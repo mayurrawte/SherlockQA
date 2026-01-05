@@ -47773,10 +47773,10 @@ async function run() {
     const body = buildReviewBody(review, prAuthor);
 
     // Determine review event
+    // Note: We use COMMENT instead of APPROVE because GitHub Actions with GITHUB_TOKEN
+    // is not permitted to approve pull requests by default (security feature)
     let event = 'COMMENT';
-    if (review.verdict === 'approved') {
-      event = 'APPROVE';
-    } else if (review.verdict === 'do_not_merge') {
+    if (review.verdict === 'do_not_merge') {
       event = 'REQUEST_CHANGES';
     }
 
