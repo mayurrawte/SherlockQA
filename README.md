@@ -1,9 +1,17 @@
-# SherlockQA
+<p align="center">
+  <img src="sherlockqa.png" alt="SherlockQA Logo" width="200">
+</p>
 
-> Elementary, my dear developer. AI-powered code review and quality assurance.
+<h1 align="center">SherlockQA</h1>
 
-[![GitHub Marketplace](https://img.shields.io/badge/Marketplace-SherlockQA-blue?logo=github)](https://github.com/marketplace/actions/sherlockqa)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+<p align="center">
+  <em>Elementary, my dear developer. AI-powered code review and quality assurance.</em>
+</p>
+
+<p align="center">
+  <a href="https://github.com/marketplace/actions/sherlockqa"><img src="https://img.shields.io/badge/Marketplace-SherlockQA-blue?logo=github" alt="GitHub Marketplace"></a>
+  <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT"></a>
+</p>
 
 SherlockQA is a GitHub Action that reviews your pull requests using AI, identifying bugs, security issues, and suggesting QA test scenarios.
 
