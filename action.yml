@@ -1,0 +1,53 @@
+name: 'SherlockQA'
+description: 'AI-powered code review and QA that finds bugs, security issues, and suggests test scenarios'
+author: 'mayurrawte'
+
+branding:
+  icon: 'search'
+  color: 'purple'
+
+inputs:
+  github-token:
+    description: 'GitHub token for API access'
+    required: true
+    default: ${{ github.token }}
+  openai-api-key:
+    description: 'OpenAI API key'
+    required: false
+  azure-api-key:
+    description: 'Azure OpenAI API key'
+    required: false
+  azure-endpoint:
+    description: 'Azure OpenAI endpoint URL'
+    required: false
+  azure-model:
+    description: 'Azure OpenAI model deployment name'
+    required: false
+  ai-provider:
+    description: 'AI provider to use (openai or azure)'
+    required: false
+    default: 'openai'
+  model:
+    description: 'Model to use for review'
+    required: false
+    default: 'gpt-4'
+  min-severity:
+    description: 'Minimum severity to report (error, warning, suggestion)'
+    required: false
+    default: 'warning'
+  ignore-patterns:
+    description: 'Comma-separated list of file patterns to ignore'
+    required: false
+    default: '*.md,*.txt,package-lock.json,yarn.lock'
+
+outputs:
+  verdict:
+    description: 'Review verdict (approved, needs_changes, do_not_merge)'
+  summary:
+    description: 'Review summary'
+  issues-count:
+    description: 'Number of issues found'
+
+runs:
+  using: 'node20'
+  main: 'dist/index.js'
