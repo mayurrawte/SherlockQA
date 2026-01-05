@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="sherlock-transparent.png" alt="SherlockQA Logo" width="200">
+  <img src="assets/sherlock-transparent.png" alt="SherlockQA Logo" width="200">
 </p>
 
 <h1 align="center">SherlockQA</h1>
