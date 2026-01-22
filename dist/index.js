@@ -47696,6 +47696,8 @@ async function run() {
     const persona = core.getInput('persona') || '';
     const domainKnowledge = core.getInput('domain-knowledge') || '';
     const maxTokens = parseInt(core.getInput('max-tokens') || '4096', 10);
+    const autoApprove = core.getInput('auto-approve') === 'true';
+    const codeQuality = core.getInput('code-quality') === 'true';
 
     // Validate we're running on a PR
     const context = github.context;
@@ -47711,6 +47713,9 @@ async function run() {
     const commitSha = context.payload.pull_request.head.sha;
 
     core.info(`Reviewing PR #${prNumber} by @${prAuthor}`);
+
+    // Find and dismiss previous SherlockQA review, preserving checked scenarios
+    const previousCheckedScenarios = await findAndDismissPreviousReview(octokit, owner, repo, prNumber);
 
     // Get PR diff
     const { data: diff } = await octokit.rest.pulls.get({
@@ -47740,7 +47745,7 @@ async function run() {
     core.info(`Reviewing ${filesToReview.length} files using ${aiProvider}`);
 
     // Get review from AI
-    const review = await getAIReview(aiProvider, model, diff, filesToReview, prAuthor, persona, domainKnowledge, maxTokens);
+    const review = await getAIReview(aiProvider, model, diff, filesToReview, prAuthor, persona, domainKnowledge, maxTokens, codeQuality);
 
     core.info(`Review verdict: ${review.verdict}`);
     core.info(`Found ${review.line_comments?.length || 0} issues`);
@@ -47769,14 +47774,16 @@ async function run() {
       }
     }
 
-    // Build review body
-    const body = buildReviewBody(review, prAuthor);
+    // Build review body (preserving previously checked scenarios)
+    const body = buildReviewBody(review, prAuthor, previousCheckedScenarios);
 
     // Determine review event
-    // Note: We use COMMENT instead of APPROVE because GitHub Actions with GITHUB_TOKEN
-    // is not permitted to approve pull requests by default (security feature)
     let event = 'COMMENT';
-    if (review.verdict === 'do_not_merge') {
+    if (review.verdict === 'approved' && autoApprove) {
+      // Note: Approving PRs requires either a PAT or enabling "Allow GitHub Actions to approve pull requests"
+      // in repository settings under Actions > General > Workflow permissions
+      event = 'APPROVE';
+    } else if (review.verdict === 'do_not_merge') {
       event = 'REQUEST_CHANGES';
     }
 
@@ -47808,7 +47815,53 @@ async function run() {
   }
 }
 
-async function getAIReview(provider, model, diff, files, prAuthor, persona, domainKnowledge, maxTokens) {
+async function findAndDismissPreviousReview(octokit, owner, repo, prNumber) {
+  const checkedScenarios = new Set();
+
+  try {
+    // Get all reviews on the PR
+    const { data: reviews } = await octokit.rest.pulls.listReviews({
+      owner,
+      repo,
+      pull_number: prNumber
+    });
+
+    // Find SherlockQA reviews (identified by the header)
+    const sherlockReviews = reviews.filter(review =>
+      review.body && review.body.includes("## 🔍 SherlockQA's Review")
+    );
+
+    for (const review of sherlockReviews) {
+      // Parse checked scenarios from the review body
+      const checkedMatches = review.body.matchAll(/- \[x\] (.+)/gi);
+      for (const match of checkedMatches) {
+        checkedScenarios.add(match[1].trim());
+      }
+
+      // Dismiss the previous review to collapse it
+      try {
+        await octokit.rest.pulls.dismissReview({
+          owner,
+          repo,
+          pull_number: prNumber,
+          review_id: review.id,
+          message: '🔄 Updated review available below (PR was updated)'
+        });
+        core.info(`Dismissed previous SherlockQA review #${review.id}`);
+      } catch (dismissError) {
+        // Dismissal may fail if review is not in a dismissable state (e.g., COMMENTED)
+        // In that case, we just continue - the old review will remain but new one will be added
+        core.info(`Could not dismiss review #${review.id}: ${dismissError.message}`);
+      }
+    }
+  } catch (error) {
+    core.warning(`Failed to check for previous reviews: ${error.message}`);
+  }
+
+  return checkedScenarios;
+}
+
+async function getAIReview(provider, model, diff, files, prAuthor, persona, domainKnowledge, maxTokens, codeQuality) {
   const changedFiles = files.map(f => f.filename).join('\n');
 
   // Truncate diff if too large
@@ -47817,7 +47870,7 @@ async function getAIReview(provider, model, diff, files, prAuthor, persona, doma
     diffContent = diff.slice(0, 50000) + '\n\n... [diff truncated]';
   }
 
-  const systemPrompt = buildSystemPrompt(persona, domainKnowledge);
+  const systemPrompt = buildSystemPrompt(persona, domainKnowledge, codeQuality);
   const userPrompt = buildUserPrompt(changedFiles, diffContent, prAuthor);
 
   let response;
@@ -47927,7 +47980,7 @@ async function callAzureResponsesAPI(systemPrompt, userPrompt, model, maxTokens)
   return reviewContent;
 }
 
-function buildSystemPrompt(persona, domainKnowledge) {
+function buildSystemPrompt(persona, domainKnowledge, codeQuality) {
   let prompt = '';
 
   // Add persona if provided
@@ -47955,7 +48008,15 @@ ${domainKnowledge}`;
 - **Breaking Changes** - API/schema changes, backward compatibility
 - **Security** - Injection, credentials, input validation
 - **Test Scenarios** - How can this fail? What would a user try?
-- **Orphaned/Incomplete** - Missing pairs (create without delete, open without close, etc.)
+- **Orphaned/Incomplete** - Missing pairs (create without delete, open without close, etc.)`;
+
+  // Add code quality focus if enabled
+  if (codeQuality) {
+    prompt += `
+- **Code Quality** - Analyze for repetitive/duplicated code, code smells, maintainability issues, overly complex functions`;
+  }
+
+  prompt += `
 
 ## Output Format:
 You MUST respond with a JSON object in this exact format:
@@ -47968,7 +48029,18 @@ You MUST respond with a JSON object in this exact format:
   "tests_required": true|false,
   "test_suggestion": "If tests_required is true, explain what tests to write",
   "qa_scenarios": ["Scenario 1", "Scenario 2"],
-  "questions": ["Question for author"],
+  "questions": ["Question for author"],`;
+
+  // Add code quality to output format if enabled
+  if (codeQuality) {
+    prompt += `
+  "code_quality": {
+    "summary": "Brief assessment of code quality",
+    "issues": ["List of code quality issues like repetitive code, complex functions, etc."]
+  },`;
+  }
+
+  prompt += `
   "verdict": "approved|needs_changes|do_not_merge"
 }
 \`\`\`
@@ -47976,8 +48048,13 @@ You MUST respond with a JSON object in this exact format:
 ## Guidelines:
 - ONLY comment on actual issues, not style preferences
 - Use severity "error" for bugs/security, "warning" for potential problems, "suggestion" for improvements
-- Set tests_required to true only for new business logic without coverage
+- **tests_required**: Set to true ONLY when the change introduces significant new business logic, complex algorithms, or critical functionality that genuinely needs test coverage. Do NOT require tests for: simple refactors, config changes, minor bug fixes, documentation, or straightforward CRUD operations. Be pragmatic - not every change needs tests.
 - Keep comments concise and actionable`;
+
+  if (codeQuality) {
+    prompt += `
+- For code_quality, identify repetitive patterns, duplicated logic, overly complex functions (high cyclomatic complexity), and maintainability concerns`;
+  }
 
   return prompt;
 }
@@ -48063,7 +48140,7 @@ function parseDiffForLinePositions(diffText) {
   return fileLineMap;
 }
 
-function buildReviewBody(review, prAuthor) {
+function buildReviewBody(review, prAuthor, previousCheckedScenarios = new Set()) {
   const parts = [`## 🔍 SherlockQA's Review\n`];
 
   parts.push(`### 📝 Summary\n${review.summary || 'No summary'}\n`);
@@ -48076,7 +48153,12 @@ function buildReviewBody(review, prAuthor) {
 
   if (review.qa_scenarios?.length > 0) {
     parts.push(`### 🎯 QA Test Scenarios`);
-    review.qa_scenarios.forEach(s => parts.push(`- [ ] ${s}`));
+    review.qa_scenarios.forEach(scenario => {
+      // Check if this scenario (or a similar one) was previously checked
+      const isChecked = isScenarioPreviouslyChecked(scenario, previousCheckedScenarios);
+      const checkbox = isChecked ? '[x]' : '[ ]';
+      parts.push(`- ${checkbox} ${scenario}`);
+    });
     parts.push('');
   }
 
@@ -48084,6 +48166,18 @@ function buildReviewBody(review, prAuthor) {
     parts.push(`### ❓ Questions`);
     review.questions.forEach(q => parts.push(`- ${q}`));
     parts.push('');
+  }
+
+  // Add code quality section if present
+  if (review.code_quality) {
+    parts.push(`### 🧹 Code Quality`);
+    if (review.code_quality.summary) {
+      parts.push(`${review.code_quality.summary}\n`);
+    }
+    if (review.code_quality.issues?.length > 0) {
+      review.code_quality.issues.forEach(issue => parts.push(`- ${issue}`));
+      parts.push('');
+    }
   }
 
   const verdictEmoji = { approved: '✅', needs_changes: '⚠️', do_not_merge: '❌' };
@@ -48098,6 +48192,33 @@ function matchPattern(filename, pattern) {
     return filename.endsWith(pattern.slice(1));
   }
   return filename === pattern || filename.includes(pattern);
+}
+
+function isScenarioPreviouslyChecked(scenario, previousCheckedScenarios) {
+  // Normalize the scenario text for comparison
+  const normalize = (text) => text.toLowerCase().replace(/[^\w\s]/g, '').trim();
+  const normalizedScenario = normalize(scenario);
+
+  for (const checked of previousCheckedScenarios) {
+    const normalizedChecked = normalize(checked);
+    // Exact match
+    if (normalizedScenario === normalizedChecked) {
+      return true;
+    }
+    // Fuzzy match - if one contains most of the other (for slight wording changes)
+    if (normalizedScenario.includes(normalizedChecked) || normalizedChecked.includes(normalizedScenario)) {
+      return true;
+    }
+    // Check word overlap (if >70% of words match)
+    const scenarioWords = new Set(normalizedScenario.split(/\s+/));
+    const checkedWords = new Set(normalizedChecked.split(/\s+/));
+    const intersection = [...scenarioWords].filter(w => checkedWords.has(w));
+    const minSize = Math.min(scenarioWords.size, checkedWords.size);
+    if (minSize > 0 && intersection.length / minSize >= 0.7) {
+      return true;
+    }
+  }
+  return false;
 }
 
 run();

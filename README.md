@@ -24,6 +24,8 @@ SherlockQA is a GitHub Action that reviews your pull requests using AI, identify
 - **Smart Verdicts** - Approves, requests changes, or flags PRs
 - **Custom Prompts** - Add domain-specific context for better reviews
 - **Multiple AI Providers** - Supports OpenAI, Azure OpenAI, and Azure Responses API
+- **Smart Updates** - When a PR is updated, previous reviews are dismissed and checked QA scenarios are preserved
+- **Code Quality Analysis** - Optional analysis for repetitive code, complexity, and maintainability
 
 ## Quick Start
 
@@ -50,6 +52,8 @@ jobs:
           openai-api-key: ${{ secrets.OPENAI_API_KEY }}
 ```
 
+> **💡 Want SherlockQA to approve PRs?** Add `auto-approve: true` and see [Permissions](#enabling-auto-approve) for required setup.
+
 ## Inputs
 
 | Input | Description | Required | Default |
@@ -67,6 +71,8 @@ jobs:
 | `persona` | Custom persona/role instructions (e.g., "Act as a security engineer") | No | - |
 | `domain-knowledge` | Domain-specific context for better reviews | No | - |
 | `max-tokens` | Maximum tokens for AI response | No | `4096` |
+| `auto-approve` | Submit APPROVE when verdict is approved (see [Permissions](#permissions)) | No | `false` |
+| `code-quality` | Enable code quality analysis (repetitive code, code smells, complexity) | No | `false` |
 
 *Either `openai-api-key` or `azure-api-key` is required based on provider.
 
@@ -133,6 +139,17 @@ jobs:
       - Edge cases: Zero weight, negative amounts, missing carrier data
 ```
 
+### With Auto-Approve and Code Quality
+
+```yaml
+- uses: mayurrawte/SherlockQA@v1
+  with:
+    github-token: ${{ secrets.GITHUB_TOKEN }}
+    openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+    auto-approve: true      # Approves PRs when no issues found
+    code-quality: true      # Analyzes for repetitive code, complexity
+```
+
 ### Full Configuration Example
 
 ```yaml
@@ -148,6 +165,8 @@ jobs:
     max-tokens: '16384'
     ignore-patterns: '*.md,*.txt,package-lock.json,yarn.lock,*.min.js'
     persona: Act as a senior security engineer with expertise in OWASP vulnerabilities
+    auto-approve: true
+    code-quality: true
     domain-knowledge: |
       Your domain-specific context here...
 ```
@@ -171,9 +190,77 @@ Add unit tests for token validation and expiration handling.
 - [ ] Test token expiration after 24 hours
 - [ ] Test concurrent sessions
 
+### 🧹 Code Quality
+Good overall structure with clear separation of concerns.
+
+- Consider extracting token generation logic into a separate utility function
+- The validateToken function has high cyclomatic complexity (8 branches)
+
 ### 🏁 Verdict
 ⚠️ Needs Changes
 ```
+
+> Note: The Code Quality section only appears when `code-quality: true` is set.
+
+## Permissions
+
+### Basic Permissions (Comment Only)
+
+```yaml
+permissions:
+  contents: read
+  pull-requests: write
+```
+
+This allows SherlockQA to read the PR diff and post review comments.
+
+### Enabling Auto-Approve
+
+> **⚠️ Why is auto-approve not working?**
+>
+> By default, GitHub Actions using `GITHUB_TOKEN` cannot approve pull requests. This is a GitHub security feature. If you enable `auto-approve: true` without proper permissions, the action will fall back to posting a `COMMENT` instead of `APPROVE`.
+
+To use `auto-approve: true`, you need **one** of the following:
+
+#### Option 1: Enable in Repository Settings (Recommended)
+
+1. Go to your repository **Settings**
+2. Navigate to **Actions** > **General**
+3. Scroll down to **Workflow permissions**
+4. Check **"Allow GitHub Actions to create and approve pull requests"**
+5. Click **Save**
+
+<p align="center">
+  <img src="https://docs.github.com/assets/cb-155644/images/help/repository/actions-workflow-permissions-repository.png" alt="Workflow Permissions Settings" width="600">
+</p>
+
+Then use in your workflow:
+```yaml
+permissions:
+  contents: read
+  pull-requests: write
+
+# ...
+- uses: mayurrawte/SherlockQA@v1
+  with:
+    github-token: ${{ secrets.GITHUB_TOKEN }}
+    auto-approve: true
+    openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+```
+
+#### Option 2: Use a Personal Access Token (PAT)
+
+Create a [Personal Access Token](https://github.com/settings/tokens) with `repo` scope and add it as a repository secret:
+
+```yaml
+- uses: mayurrawte/SherlockQA@v1
+  with:
+    github-token: ${{ secrets.PAT_TOKEN }}  # PAT with repo scope
+    auto-approve: true
+    openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+```
+
+> **Note:** Using a PAT means the approval will show as coming from your personal account, not "github-actions[bot]".
 
 ## Supported Languages
 

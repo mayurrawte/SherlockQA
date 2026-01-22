@@ -66,6 +66,18 @@ inputs:
     required: false
     default: '4096'
 
+  # Approval Configuration
+  auto-approve:
+    description: 'Submit APPROVE when verdict is approved (requires PAT or repo settings to allow Actions to approve PRs)'
+    required: false
+    default: 'false'
+
+  # Code Quality Analysis
+  code-quality:
+    description: 'Enable code quality analysis (checks for repetitive code, code smells, maintainability issues)'
+    required: false
+    default: 'false'
+
 outputs:
   verdict:
     description: 'Review verdict (approved, needs_changes, do_not_merge)'
