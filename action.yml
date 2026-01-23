@@ -94,6 +94,11 @@ inputs:
     required: false
     default: 'detective'
 
+  review-strictness:
+    description: 'How strict the review should be - lenient (only critical issues), balanced (reasonable checks), strict (thorough, flags more issues)'
+    required: false
+    default: 'balanced'
+
 outputs:
   verdict:
     description: 'Review verdict (approved, needs_changes, do_not_merge)'

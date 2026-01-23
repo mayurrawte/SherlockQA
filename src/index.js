@@ -18,6 +18,7 @@ async function run() {
     const reviewStyle = core.getInput('review-style') || 'compact';
     const useEmoji = core.getInput('use-emoji') !== 'false';
     const personality = core.getInput('personality') || 'detective';
+    const reviewStrictness = core.getInput('review-strictness') || 'balanced';
 
     // Validate we're running on a PR
     const context = github.context;
@@ -65,7 +66,7 @@ async function run() {
     core.info(`Reviewing ${filesToReview.length} files using ${aiProvider}`);
 
     // Get review from AI
-    const review = await getAIReview(aiProvider, model, diff, filesToReview, prAuthor, persona, domainKnowledge, maxTokens, codeQuality, personality);
+    const review = await getAIReview(aiProvider, model, diff, filesToReview, prAuthor, persona, domainKnowledge, maxTokens, codeQuality, personality, reviewStrictness);
 
     core.info(`Review verdict: ${review.verdict}`);
     core.info(`Found ${review.line_comments?.length || 0} issues`);
@@ -181,7 +182,7 @@ async function findAndDismissPreviousReview(octokit, owner, repo, prNumber) {
   return checkedScenarios;
 }
 
-async function getAIReview(provider, model, diff, files, prAuthor, persona, domainKnowledge, maxTokens, codeQuality, personality) {
+async function getAIReview(provider, model, diff, files, prAuthor, persona, domainKnowledge, maxTokens, codeQuality, personality, strictness) {
   const changedFiles = files.map(f => f.filename).join('\n');
 
   // Truncate diff if too large
@@ -190,7 +191,7 @@ async function getAIReview(provider, model, diff, files, prAuthor, persona, doma
     diffContent = diff.slice(0, 50000) + '\n\n... [diff truncated]';
   }
 
-  const systemPrompt = buildSystemPrompt(persona, domainKnowledge, codeQuality, personality);
+  const systemPrompt = buildSystemPrompt(persona, domainKnowledge, codeQuality, personality, strictness);
   const userPrompt = buildUserPrompt(changedFiles, diffContent, prAuthor);
 
   let response;
@@ -300,7 +301,7 @@ async function callAzureResponsesAPI(systemPrompt, userPrompt, model, maxTokens)
   return reviewContent;
 }
 
-function buildSystemPrompt(persona, domainKnowledge, codeQuality, personality = 'detective') {
+function buildSystemPrompt(persona, domainKnowledge, codeQuality, personality = 'detective', strictness = 'balanced') {
   let prompt = '';
 
   // Add persona if provided (overrides personality)
@@ -358,7 +359,8 @@ function buildSystemPrompt(persona, domainKnowledge, codeQuality, personality = 
 
   prompt += `
 - Keep reviews concise - developers be busy folks
-- Don't nitpick style - focus on real problems`;
+- Don't nitpick style - focus on real problems
+- IMPORTANT: Use your personality voice for ALL fields - summary, analysis, verdict_reason, comments. Stay in character!`;
 
   // Add domain knowledge if provided
   if (domainKnowledge) {
@@ -368,13 +370,44 @@ function buildSystemPrompt(persona, domainKnowledge, codeQuality, personality = 
 ${domainKnowledge}`;
   }
 
-  prompt += `
+  // Strictness-based review focus
+  const strictnessGuidelines = {
+    lenient: `
 
-## What to Look For (only flag real problems):
-- **Bugs** - Null checks, edge cases, off-by-one errors that would actually cause issues
-- **Security** - Real vulnerabilities, not theoretical ones
+## What to Look For (only critical issues):
+- **Critical Bugs** - Only issues that would definitely crash or break functionality
+- **Security Vulnerabilities** - Only real, exploitable security issues
+- **Breaking Changes** - Only changes that would break existing integrations
+
+Be very lenient - approve unless there's a critical issue. Minor issues, code style, missing tests = don't flag.`,
+
+    balanced: `
+
+## What to Look For (flag real problems):
+- **Bugs** - Null checks, edge cases, off-by-one errors that would cause issues
+- **Security** - Real vulnerabilities, not just theoretical ones
 - **Breaking Changes** - API/schema changes that affect existing code
-- **Missing Error Handling** - Where errors could crash the app`;
+- **Missing Error Handling** - Where errors could crash the app
+- **Logic Errors** - Incorrect conditions, wrong comparisons, missed cases
+
+Be reasonable - flag issues that matter, but don't nitpick style or minor things.`,
+
+    strict: `
+
+## What to Look For (thorough review):
+- **Bugs** - Null checks, edge cases, off-by-one errors, race conditions
+- **Security** - All potential vulnerabilities, input validation, auth checks
+- **Breaking Changes** - API/schema changes, behavior changes, dependency updates
+- **Error Handling** - Missing try-catch, unhandled promises, error propagation
+- **Logic Errors** - Incorrect conditions, wrong comparisons, missed edge cases
+- **Code Quality** - Complex functions, unclear naming, magic numbers, code duplication
+- **Performance** - Inefficient loops, unnecessary re-renders, memory leaks
+- **Test Coverage** - New logic should have tests, edge cases should be covered
+
+Be thorough - flag anything that could cause problems. Better to catch issues now than in production.`
+  };
+
+  prompt += strictnessGuidelines[strictness] || strictnessGuidelines.balanced;
 
   prompt += `
 
@@ -398,20 +431,33 @@ Respond with this JSON:
 
   prompt += `
   "questions": [],
-  "verdict": "approved|needs_changes|do_not_merge"
+  "analysis": "2-3 sentences explaining what you reviewed and key observations about the changes",
+  "verdict": "approved|needs_changes|do_not_merge",
+  "verdict_reason": "One sentence explaining WHY this verdict - what made you approve/reject"
 }
 \`\`\`
 
-## Important Rules:
-- **tests_required**: Almost always false. Only true for complex new business logic that's risky without tests. Simple changes, refactors, config updates = no tests needed.
-- **line_comments**: Only for real issues. Empty array is fine if code looks good!
-- **qa_scenarios**: 1-3 short scenarios max. Keep them brief.
-- **questions**: Only ask if genuinely confused. Usually empty.
-- **verdict**: "approved" if no serious issues. Don't be too strict - we want to ship good code, not perfect code.`;
+## Important Rules:${strictness === 'lenient' ? `
+- **tests_required**: Almost always false. Only true for extremely risky changes.
+- **line_comments**: Only for critical issues. Empty array is perfectly fine!
+- **qa_scenarios**: 1-2 quick scenarios max.
+- **questions**: Only ask if absolutely necessary.
+- **verdict**: "approved" unless there's a critical bug or security issue. We trust developers - approve generously.` : strictness === 'strict' ? `
+- **tests_required**: True for any new business logic, complex changes, or code touching critical paths.
+- **line_comments**: Flag all issues you find - bugs, security, performance, code quality.
+- **qa_scenarios**: 3-5 thorough scenarios covering happy paths and edge cases.
+- **questions**: Ask about unclear requirements or architectural decisions.
+- **verdict**: "approved" only if code is solid. "needs_changes" for any notable issues. "do_not_merge" for bugs or security issues.` : `
+- **tests_required**: True for new business logic that's risky without tests. False for simple changes, refactors, config updates.
+- **line_comments**: Flag real issues - bugs, security, logic errors. Skip minor style issues.
+- **qa_scenarios**: 2-3 scenarios covering main flows and important edge cases.
+- **questions**: Ask if something is unclear or seems wrong.
+- **verdict**: "approved" if no significant issues. Be fair - flag real problems, but don't block good code.`}
+- **analysis**: 2-3 sentences about what you observed in the code. Use your personality voice!
+- **verdict_reason**: One clear sentence explaining WHY you gave this verdict. Stay in character!`;
 
   if (codeQuality) {
-    prompt += `
-- **code_quality**: ONE sentence, friendly tone. Example: "Clean and readable! Though that switch statement is growing some tentacles 🐙" or "Solid work - no concerns here!"`;
+    prompt += '\n- **code_quality**: ONE sentence, friendly tone. Example: "Clean and readable!" or "Solid work - no concerns here!"';
   }
 
   return prompt;
@@ -523,7 +569,18 @@ function buildReviewBody(review, prAuthor, previousCheckedScenarios = new Set(),
     // Compact: Verdict at top with stats
     parts.push(`## ${e.detective} SherlockQA's Review\n`);
     parts.push(`**Verdict:** ${verdictEmoji[review.verdict] || e.needs_changes} ${verdictText[review.verdict] || review.verdict} | ${issueCount} issues · ${qaCount} QA scenarios${questionCount > 0 ? ` · ${questionCount} questions` : ''}\n`);
+
+    // Verdict reason - why approved/rejected
+    if (review.verdict_reason) {
+      parts.push(`> ${review.verdict_reason}\n`);
+    }
+
     parts.push(`**Summary:** ${review.summary || 'No summary'}\n`);
+
+    // Analysis - detailed observations about the changes
+    if (review.analysis) {
+      parts.push(`**Analysis:** ${review.analysis}\n`);
+    }
 
     // Code quality as single line if present
     if (review.code_quality) {
@@ -565,6 +622,11 @@ function buildReviewBody(review, prAuthor, previousCheckedScenarios = new Set(),
     parts.push(`## ${e.detective} SherlockQA's Review\n`);
     parts.push(`### ${e.summary} Summary\n${review.summary || 'No summary'}\n`);
 
+    // Analysis - detailed observations
+    if (review.analysis) {
+      parts.push(`### 🔬 Analysis\n${review.analysis}\n`);
+    }
+
     if (review.tests_required && review.test_suggestion) {
       parts.push(`### ${e.tests} Tests Required`);
       parts.push(`${e.warning} **@${prAuthor}** - Please add test cases for this change:\n`);
@@ -602,6 +664,9 @@ function buildReviewBody(review, prAuthor, previousCheckedScenarios = new Set(),
     }
 
     parts.push(`### ${e.verdict} Verdict\n${verdictEmoji[review.verdict] || e.needs_changes} ${verdictText[review.verdict] || review.verdict}`);
+    if (review.verdict_reason) {
+      parts.push(`\n> ${review.verdict_reason}`);
+    }
   }
 
   return parts.join('\n');
