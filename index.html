@@ -1,0 +1,1754 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SherlockQA — AI-Powered Code Review & Quality Assurance</title>
+<meta name="description" content="Elementary, my dear developer. SherlockQA is an AI-powered GitHub Action that reviews your pull requests, identifies bugs, security issues, and suggests QA test scenarios.">
+<meta name="theme-color" content="#1a1820">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Ccircle cx='26' cy='26' r='16' fill='none' stroke='%23c8a55a' stroke-width='4'/%3E%3Cline x1='38' y1='38' x2='54' y2='54' stroke='%23c8a55a' stroke-width='5' stroke-linecap='round'/%3E%3Ccircle cx='26' cy='26' r='6' fill='%23c8a55a' opacity='.25'/%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,400;0,9..144,600;0,9..144,800;0,9..144,900;1,9..144,400;1,9..144,600&family=JetBrains+Mono:wght@400;500;600&family=Libre+Franklin:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+*, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+:root {
+  --bg: #111015;
+  --bg-raised: #1a1820;
+  --bg-surface: #21202a;
+  --border: #2a2834;
+  --border-light: #353342;
+  --accent: #c8a55a;
+  --accent-dim: rgba(200, 165, 90, 0.1);
+  --accent-mid: rgba(200, 165, 90, 0.2);
+  --brand: #7c5cbf;
+  --brand-dim: rgba(124, 92, 191, 0.1);
+  --text: #e4ded4;
+  --text-2: #a09a90;
+  --text-3: #625e56;
+  --green: #5cb870;
+  --red: #d45555;
+  --blue: #5b9bd5;
+  --font-display: 'Fraunces', Georgia, serif;
+  --font-body: 'Libre Franklin', system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', monospace;
+}
+
+html { scroll-behavior: smooth; }
+
+body {
+  font-family: var(--font-body);
+  background: var(--bg);
+  color: var(--text);
+  overflow-x: hidden;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+}
+
+body::after {
+  content: '';
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 9999;
+  opacity: 0.025;
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  background-size: 128px;
+}
+
+a { color: inherit; }
+
+/* ── Nav ── */
+nav {
+  position: fixed;
+  top: 0; left: 0; right: 0;
+  z-index: 100;
+  padding: 0 2.5rem;
+  height: 64px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: rgba(17, 16, 21, 0.85);
+  backdrop-filter: blur(16px);
+  border-bottom: 1px solid var(--border);
+}
+
+.nav-logo {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  text-decoration: none;
+}
+
+.nav-logo svg { flex-shrink: 0; }
+
+.nav-logo span {
+  font-family: var(--font-display);
+  font-weight: 800;
+  font-size: 1.15rem;
+  letter-spacing: -0.03em;
+  color: var(--text);
+}
+
+.nav-links {
+  display: flex;
+  gap: 2rem;
+  align-items: center;
+  list-style: none;
+}
+
+.nav-links a {
+  color: var(--text-2);
+  text-decoration: none;
+  font-size: 0.82rem;
+  font-weight: 500;
+  transition: color 0.15s;
+}
+
+.nav-links a:hover { color: var(--text); }
+
+.nav-cta {
+  background: var(--accent);
+  color: var(--bg) !important;
+  padding: 0.45rem 1.1rem;
+  border-radius: 6px;
+  font-weight: 700 !important;
+  font-size: 0.82rem !important;
+  transition: opacity 0.15s !important;
+}
+
+.nav-cta:hover { opacity: 0.85; }
+
+.mobile-toggle {
+  display: none;
+  background: none;
+  border: none;
+  color: var(--text);
+  cursor: pointer;
+  padding: 4px;
+}
+
+/* ── Layout ── */
+section { position: relative; z-index: 1; }
+.wrap { max-width: 1100px; margin: 0 auto; padding: 0 2rem; }
+
+/* ── Hero ── */
+.hero {
+  padding: 10rem 0 6rem;
+  position: relative;
+}
+
+.hero::before {
+  content: '';
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  height: 600px;
+  background: radial-gradient(ellipse 70% 50% at 30% 20%, rgba(200, 165, 90, 0.04) 0%, transparent 100%),
+              radial-gradient(ellipse 60% 60% at 70% 10%, rgba(124, 92, 191, 0.03) 0%, transparent 100%);
+  pointer-events: none;
+}
+
+.hero .wrap {
+  display: grid;
+  grid-template-columns: 1.1fr 1fr;
+  gap: 5rem;
+  align-items: start;
+}
+
+.hero-eyebrow {
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  font-weight: 500;
+  color: var(--accent);
+  letter-spacing: 0.08em;
+  margin-bottom: 1.25rem;
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.hero-eyebrow::before {
+  content: '';
+  width: 24px;
+  height: 1px;
+  background: var(--accent);
+}
+
+.hero h1 {
+  font-family: var(--font-display);
+  font-size: 3.6rem;
+  font-weight: 900;
+  line-height: 1.06;
+  letter-spacing: -0.035em;
+  margin-bottom: 1.25rem;
+}
+
+.hero h1 em { font-style: italic; color: var(--accent); }
+
+.hero-tagline {
+  font-family: var(--font-display);
+  font-style: italic;
+  font-weight: 400;
+  font-size: 1.15rem;
+  color: var(--text-2);
+  margin-bottom: 1.5rem;
+  line-height: 1.5;
+}
+
+.hero-desc {
+  color: var(--text-2);
+  font-size: 0.95rem;
+  line-height: 1.75;
+  margin-bottom: 2.25rem;
+  max-width: 440px;
+}
+
+.hero-actions { display: flex; gap: 0.75rem; align-items: center; }
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.75rem 1.5rem;
+  border-radius: 8px;
+  font-family: var(--font-body);
+  font-size: 0.88rem;
+  font-weight: 600;
+  text-decoration: none;
+  transition: all 0.15s;
+  cursor: pointer;
+  border: none;
+}
+
+.btn svg { width: 16px; height: 16px; }
+.btn-gold { background: var(--accent); color: var(--bg); }
+.btn-gold:hover { opacity: 0.85; }
+.btn-ghost { background: transparent; color: var(--text-2); border: 1px solid var(--border-light); }
+.btn-ghost:hover { border-color: var(--text-3); color: var(--text); }
+
+/* ── PR mockup / code cards ── */
+.hero-visual { padding-top: 1.5rem; }
+
+.pr-card {
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+.pr-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0.65rem 1rem;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-surface);
+}
+
+.pr-dot { width: 9px; height: 9px; border-radius: 50%; }
+.pr-dot-r { background: #e55; }
+.pr-dot-y { background: #da3; }
+.pr-dot-g { background: #5a5; }
+
+.pr-bar-text {
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  color: var(--text-3);
+  margin-left: 6px;
+}
+
+.diff-line {
+  display: flex;
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  line-height: 1.65;
+}
+
+.diff-ln {
+  width: 36px;
+  padding: 0 6px;
+  text-align: right;
+  color: var(--text-3);
+  background: rgba(0,0,0,0.15);
+  flex-shrink: 0;
+  user-select: none;
+}
+
+.diff-code { padding: 0 10px; white-space: pre; flex: 1; overflow: hidden; }
+.diff-add { background: rgba(90, 184, 112, 0.06); }
+.diff-add .diff-ln { background: rgba(90, 184, 112, 0.08); }
+.diff-add .diff-code { color: var(--green); }
+.diff-rm { background: rgba(212, 85, 85, 0.06); }
+.diff-rm .diff-ln { background: rgba(212, 85, 85, 0.08); }
+.diff-rm .diff-code { color: var(--red); }
+.diff-ctx .diff-code { color: var(--text-3); }
+
+.pr-comment {
+  padding: 0.85rem 1rem;
+  border-top: 2px solid var(--accent);
+  background: var(--accent-dim);
+}
+
+.pr-comment-head {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-bottom: 0.4rem;
+}
+
+.pr-avi {
+  width: 20px; height: 20px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, var(--brand), var(--accent));
+  flex-shrink: 0;
+}
+
+.pr-comment-head strong {
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  font-weight: 600;
+}
+
+.pr-bot-tag {
+  font-family: var(--font-mono);
+  font-size: 0.58rem;
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: var(--brand-dim);
+  color: var(--brand);
+  border: 1px solid rgba(124,92,191,0.2);
+}
+
+.pr-comment p {
+  font-size: 0.78rem;
+  color: var(--text-2);
+  line-height: 1.55;
+  padding-left: 1.6rem;
+}
+
+.pr-comment code {
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  background: rgba(255,255,255,0.05);
+  padding: 0.1em 0.3em;
+  border-radius: 3px;
+  color: var(--blue);
+}
+
+.pr-sev {
+  color: var(--red);
+  font-weight: 700;
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+}
+
+.pr-footer {
+  padding: 0.65rem 1rem;
+  border-top: 1px solid var(--border);
+  background: var(--bg-surface);
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.pr-verdict-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--red); }
+.pr-footer span { font-family: var(--font-mono); font-size: 0.7rem; color: var(--text-2); }
+.pr-footer small { font-size: 0.65rem; color: var(--text-3); margin-left: auto; }
+
+/* ── Section heading ── */
+.sh { margin-bottom: 3.5rem; }
+
+.sh-label {
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  font-weight: 500;
+  color: var(--accent);
+  letter-spacing: 0.08em;
+  margin-bottom: 0.6rem;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.sh-label::before { content: ''; width: 16px; height: 1px; background: var(--accent); }
+
+.sh h2 {
+  font-family: var(--font-display);
+  font-size: 2.4rem;
+  font-weight: 800;
+  line-height: 1.1;
+  letter-spacing: -0.03em;
+  margin-bottom: 0.75rem;
+}
+
+.sh p {
+  color: var(--text-2);
+  font-size: 0.95rem;
+  max-width: 520px;
+  line-height: 1.7;
+}
+
+/* ── Features ── */
+.features { padding: 5rem 0; }
+
+.feat-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 1px;
+  background: var(--border);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+.feat {
+  background: var(--bg-raised);
+  padding: 2rem 1.75rem;
+  transition: background 0.2s;
+}
+
+.feat:hover { background: var(--bg-surface); }
+
+.feat-num {
+  font-family: var(--font-mono);
+  font-size: 0.65rem;
+  color: var(--text-3);
+  margin-bottom: 1rem;
+  letter-spacing: 0.05em;
+}
+
+.feat h3 {
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: 1.15rem;
+  margin-bottom: 0.4rem;
+}
+
+.feat p { color: var(--text-2); font-size: 0.85rem; line-height: 1.65; }
+
+/* ── Personality ── */
+.personality { padding: 5rem 0; }
+.personality .sh { text-align: center; }
+.personality .sh-label { justify-content: center; }
+.personality .sh-label::before { display: none; }
+
+.p-demo { max-width: 720px; margin: 0 auto; }
+
+.p-tabs {
+  display: flex;
+  gap: 2px;
+  margin-bottom: 1.5rem;
+  background: var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.p-tab {
+  flex: 1;
+  padding: 0.65rem 0.5rem;
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  font-weight: 500;
+  text-align: center;
+  border: none;
+  background: var(--bg-raised);
+  color: var(--text-3);
+  cursor: pointer;
+  transition: all 0.15s;
+  text-transform: capitalize;
+}
+
+.p-tab:hover { color: var(--text-2); background: var(--bg-surface); }
+.p-tab.on { background: var(--accent); color: var(--bg); font-weight: 600; }
+
+.p-card {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+  background: var(--bg-raised);
+}
+
+.p-card-head {
+  padding: 0.65rem 1rem;
+  background: var(--bg-surface);
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.p-card-head .pr-avi { width: 18px; height: 18px; }
+
+.p-card-name { font-family: var(--font-mono); font-size: 0.75rem; font-weight: 600; }
+
+.p-card-mode {
+  font-family: var(--font-mono);
+  font-size: 0.6rem;
+  margin-left: auto;
+  padding: 1px 6px;
+  border-radius: 3px;
+  background: var(--brand-dim);
+  color: var(--brand);
+  border: 1px solid rgba(124,92,191,0.18);
+  transition: all 0.2s;
+}
+
+.p-card-code { border-bottom: 1px solid var(--border); }
+
+.p-card-body {
+  padding: 1.1rem 1rem;
+  border-top: 2px solid var(--accent);
+  min-height: 88px;
+}
+
+.p-sev {
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  font-weight: 600;
+  color: var(--red);
+  background: rgba(212,85,85,0.08);
+  padding: 2px 6px;
+  border-radius: 3px;
+  display: inline-block;
+  margin-bottom: 0.5rem;
+}
+
+.p-text { font-size: 0.88rem; line-height: 1.65; color: var(--text); transition: opacity 0.2s; }
+
+/* ── Review Preview ── */
+.review-preview { padding: 5rem 0; }
+
+.review-mockup {
+  max-width: 720px;
+  margin: 0 auto;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+  background: var(--bg-raised);
+}
+
+.review-mockup-bar {
+  padding: 0.65rem 1rem;
+  background: var(--bg-surface);
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.review-mockup-bar .pr-avi { width: 18px; height: 18px; }
+
+.review-mockup-bar span {
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  font-weight: 600;
+}
+
+.review-mockup-bar small {
+  font-family: var(--font-mono);
+  font-size: 0.6rem;
+  color: var(--text-3);
+  margin-left: auto;
+}
+
+.review-body {
+  padding: 1.25rem 1.25rem;
+  font-size: 0.84rem;
+  line-height: 1.7;
+  color: var(--text-2);
+}
+
+.review-body h4 {
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: 1.05rem;
+  color: var(--text);
+  margin-bottom: 0.6rem;
+}
+
+.review-verdict-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.6rem 0.85rem;
+  background: rgba(92, 184, 112, 0.06);
+  border: 1px solid rgba(92, 184, 112, 0.12);
+  border-radius: 6px;
+  margin-bottom: 1rem;
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+}
+
+.review-verdict-bar .vd {
+  color: var(--green);
+  font-weight: 600;
+}
+
+.review-verdict-bar .vs {
+  color: var(--text-3);
+  font-size: 0.7rem;
+  margin-left: auto;
+}
+
+.review-summary {
+  margin-bottom: 1rem;
+  padding-bottom: 1rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.review-summary strong { color: var(--text); }
+
+.review-qa { margin-bottom: 1rem; }
+
+.review-qa-title {
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--accent);
+  margin-bottom: 0.5rem;
+  letter-spacing: 0.03em;
+}
+
+.review-qa ul {
+  list-style: none;
+  padding: 0;
+}
+
+.review-qa li {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.3rem 0;
+  font-size: 0.82rem;
+}
+
+.review-qa li::before {
+  content: '';
+  width: 14px; height: 14px;
+  border: 1.5px solid var(--border-light);
+  border-radius: 3px;
+  flex-shrink: 0;
+}
+
+.review-quality {
+  padding: 0.65rem 0.85rem;
+  background: var(--accent-dim);
+  border-radius: 6px;
+  font-size: 0.82rem;
+  color: var(--text-2);
+  border-left: 2px solid var(--accent);
+}
+
+/* ── How it works ── */
+.how { padding: 5rem 0; }
+
+.how-steps {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 1.5rem;
+}
+
+.how-step {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 2rem 1.5rem;
+  background: var(--bg-raised);
+}
+
+.how-step-n {
+  font-family: var(--font-display);
+  font-size: 2.5rem;
+  font-weight: 900;
+  color: var(--border-light);
+  line-height: 1;
+  margin-bottom: 1rem;
+  letter-spacing: -0.04em;
+}
+
+.how-step h3 { font-family: var(--font-display); font-weight: 600; font-size: 1.15rem; margin-bottom: 0.4rem; }
+.how-step p { color: var(--text-2); font-size: 0.85rem; line-height: 1.65; }
+
+/* ── Usage Examples ── */
+.usage { padding: 5rem 0; }
+
+.usage-tabs {
+  display: flex;
+  gap: 2px;
+  background: var(--border);
+  border-radius: 8px 8px 0 0;
+  overflow: hidden;
+  max-width: 780px;
+  margin: 0 auto;
+}
+
+.usage-tab {
+  flex: 1;
+  padding: 0.6rem 0.5rem;
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  font-weight: 500;
+  text-align: center;
+  border: none;
+  background: var(--bg-raised);
+  color: var(--text-3);
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.usage-tab:hover { color: var(--text-2); background: var(--bg-surface); }
+.usage-tab.on { background: var(--accent); color: var(--bg); font-weight: 600; }
+
+.usage-panels {
+  max-width: 780px;
+  margin: 0 auto;
+}
+
+.usage-panel {
+  display: none;
+}
+
+.usage-panel.on { display: block; }
+
+.usage-panel .code-block {
+  border-radius: 0 0 10px 10px;
+  border-top: none;
+}
+
+.usage-note {
+  padding: 0.75rem 1rem;
+  font-size: 0.8rem;
+  color: var(--text-3);
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-top: none;
+  border-radius: 0 0 10px 10px;
+  font-style: italic;
+}
+
+/* ── Quick Start ── */
+.quickstart { padding: 5rem 0; }
+
+.qs-layout {
+  display: grid;
+  grid-template-columns: 1fr 1.15fr;
+  gap: 4rem;
+  align-items: start;
+}
+
+.qs-text .sh { margin-bottom: 2rem; }
+
+.qs-note { font-size: 0.85rem; color: var(--text-2); line-height: 1.7; margin-bottom: 1rem; }
+
+.qs-file {
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  color: var(--accent);
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.3rem 0.7rem;
+  background: var(--accent-dim);
+  border-radius: 5px;
+  border: 1px solid var(--accent-mid);
+  margin-bottom: 1.25rem;
+}
+
+.code-block {
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+.code-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.55rem 0.85rem;
+  background: var(--bg-surface);
+  border-bottom: 1px solid var(--border);
+}
+
+.code-bar-left { display: flex; align-items: center; gap: 6px; }
+
+.code-bar-file {
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  color: var(--text-3);
+  margin-left: 6px;
+}
+
+.code-copy-btn {
+  background: none;
+  border: 1px solid var(--border-light);
+  color: var(--text-3);
+  padding: 3px 8px;
+  border-radius: 4px;
+  font-family: var(--font-mono);
+  font-size: 0.65rem;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.code-copy-btn:hover { border-color: var(--text-3); color: var(--text-2); }
+
+.code-pre {
+  padding: 1rem;
+  font-family: var(--font-mono);
+  font-size: 0.74rem;
+  line-height: 1.75;
+  overflow-x: auto;
+  color: var(--text-2);
+}
+
+.code-pre .k { color: var(--green); }
+.code-pre .s { color: var(--blue); }
+.code-pre .v { color: #d4a55a; }
+.code-pre .p { color: #b898e0; }
+.code-pre .c { color: var(--text-3); font-style: italic; }
+
+/* ── Strictness ── */
+.strictness { padding: 5rem 0; }
+
+.strict-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 1.5rem;
+}
+
+.strict-card {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+  background: var(--bg-raised);
+}
+
+.strict-card-head {
+  padding: 1rem 1.25rem;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.strict-dot {
+  width: 10px; height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.strict-card-head h4 {
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: 1.05rem;
+}
+
+.strict-card-body {
+  padding: 1.25rem;
+}
+
+.strict-card-body p {
+  font-size: 0.82rem;
+  color: var(--text-2);
+  line-height: 1.6;
+  margin-bottom: 0.85rem;
+}
+
+.strict-list {
+  list-style: none;
+  padding: 0;
+}
+
+.strict-list li {
+  font-size: 0.78rem;
+  color: var(--text-2);
+  padding: 0.25rem 0;
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+}
+
+.strict-list li::before {
+  content: '\2022';
+  color: var(--text-3);
+  flex-shrink: 0;
+}
+
+.strict-bar {
+  font-family: var(--font-mono);
+  font-size: 0.65rem;
+  padding: 0.4rem 0.75rem;
+  background: var(--bg-surface);
+  border-top: 1px solid var(--border);
+  color: var(--text-3);
+  display: flex;
+  justify-content: space-between;
+}
+
+/* ── Config ── */
+.config { padding: 5rem 0; }
+
+.config-list {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 1px;
+  background: var(--border);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+.config-row {
+  background: var(--bg-raised);
+  padding: 1.1rem 1.25rem;
+  transition: background 0.15s;
+}
+
+.config-row:hover { background: var(--bg-surface); }
+.config-key { font-family: var(--font-mono); font-size: 0.78rem; font-weight: 600; color: var(--accent); margin-bottom: 0.15rem; }
+.config-val { font-size: 0.8rem; color: var(--text-2); line-height: 1.4; }
+.config-def { font-family: var(--font-mono); font-size: 0.65rem; color: var(--text-3); margin-top: 0.25rem; }
+
+/* ── Languages ── */
+.languages { padding: 5rem 0; }
+
+.lang-row { display: flex; flex-wrap: wrap; gap: 0.6rem; justify-content: center; }
+
+.lang-tag {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.5rem 1rem;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 0.85rem;
+  font-weight: 500;
+  color: var(--text-2);
+  transition: border-color 0.15s;
+}
+
+.lang-tag:hover { border-color: var(--border-light); }
+.lang-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+
+/* ── Privacy ── */
+.privacy { padding: 5rem 0; }
+
+.privacy-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 1.5rem;
+}
+
+.privacy-card {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 1.75rem 1.5rem;
+  background: var(--bg-raised);
+}
+
+.privacy-card h4 {
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: 1.05rem;
+  margin-bottom: 0.4rem;
+}
+
+.privacy-card p {
+  font-size: 0.84rem;
+  color: var(--text-2);
+  line-height: 1.6;
+}
+
+/* ── FAQ ── */
+.faq { padding: 5rem 0; }
+
+.faq-list {
+  max-width: 720px;
+  margin: 0 auto;
+}
+
+.faq-item {
+  border-bottom: 1px solid var(--border);
+}
+
+.faq-item:first-child { border-top: 1px solid var(--border); }
+
+.faq-q {
+  width: 100%;
+  background: none;
+  border: none;
+  padding: 1.1rem 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  cursor: pointer;
+  text-align: left;
+  font-family: var(--font-body);
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: var(--text);
+  transition: color 0.15s;
+}
+
+.faq-q:hover { color: var(--accent); }
+
+.faq-q svg {
+  width: 16px; height: 16px;
+  stroke: var(--text-3);
+  flex-shrink: 0;
+  transition: transform 0.2s;
+}
+
+.faq-item.open .faq-q svg { transform: rotate(45deg); }
+
+.faq-a {
+  max-height: 0;
+  overflow: hidden;
+  transition: max-height 0.25s ease;
+}
+
+.faq-a-inner {
+  padding: 0 0 1.1rem;
+  font-size: 0.88rem;
+  color: var(--text-2);
+  line-height: 1.7;
+}
+
+.faq-a-inner code {
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  background: var(--bg-surface);
+  padding: 0.1em 0.35em;
+  border-radius: 3px;
+  color: var(--accent);
+}
+
+/* ── CTA ── */
+.cta { padding: 5rem 0 3rem; }
+
+.cta-inner {
+  text-align: center;
+  padding: 4rem 2rem;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--bg-raised);
+  position: relative;
+  overflow: hidden;
+}
+
+.cta-inner::before {
+  content: '';
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, var(--accent), transparent);
+}
+
+.cta-inner h2 {
+  font-family: var(--font-display);
+  font-size: 2.2rem;
+  font-weight: 800;
+  margin-bottom: 0.75rem;
+  letter-spacing: -0.02em;
+}
+
+.cta-inner h2 em { font-style: italic; color: var(--accent); }
+
+.cta-inner p {
+  color: var(--text-2);
+  font-size: 0.95rem;
+  max-width: 420px;
+  margin: 0 auto 2rem;
+  line-height: 1.7;
+}
+
+.cta-btns { display: flex; gap: 0.75rem; justify-content: center; }
+
+/* ── Footer ── */
+footer {
+  position: relative;
+  z-index: 1;
+  padding: 2rem 0;
+  border-top: 1px solid var(--border);
+}
+
+.footer-inner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 0.8rem;
+  color: var(--text-3);
+}
+
+.footer-inner a { text-decoration: none; transition: color 0.15s; }
+.footer-inner a:hover { color: var(--text-2); }
+.footer-r { display: flex; gap: 1.5rem; }
+
+/* ── Scroll reveal ── */
+[data-a] {
+  opacity: 0;
+  transform: translateY(16px);
+  transition: opacity 0.5s ease, transform 0.5s ease;
+}
+
+[data-a].in { opacity: 1; transform: translateY(0); }
+
+/* ── Responsive ── */
+@media (max-width: 900px) {
+  .hero .wrap { grid-template-columns: 1fr; gap: 3rem; }
+  .hero { padding: 7rem 0 4rem; }
+  .hero h1 { font-size: 2.6rem; }
+  .feat-grid { grid-template-columns: repeat(2, 1fr); }
+  .config-list { grid-template-columns: repeat(2, 1fr); }
+  .how-steps { grid-template-columns: 1fr; }
+  .strict-grid { grid-template-columns: 1fr; }
+  .privacy-grid { grid-template-columns: 1fr; }
+  .qs-layout { grid-template-columns: 1fr; gap: 2rem; }
+}
+
+@media (max-width: 640px) {
+  nav { padding: 0 1.25rem; }
+  .wrap { padding: 0 1.25rem; }
+  .nav-links { display: none; }
+  .nav-links.open {
+    display: flex;
+    flex-direction: column;
+    position: absolute;
+    top: 64px; left: 0; right: 0;
+    background: rgba(17,16,21,0.97);
+    backdrop-filter: blur(16px);
+    padding: 1.25rem;
+    border-bottom: 1px solid var(--border);
+    gap: 0.75rem;
+  }
+  .mobile-toggle { display: block; }
+  .hero h1 { font-size: 2.2rem; }
+  .hero { padding: 6rem 0 3rem; }
+  .feat-grid { grid-template-columns: 1fr; }
+  .config-list { grid-template-columns: 1fr; }
+  .p-tabs { flex-wrap: wrap; border-radius: 6px; }
+  .p-tab { padding: 0.5rem; font-size: 0.68rem; }
+  .usage-tabs { flex-wrap: wrap; }
+  .usage-tab { min-width: 48%; }
+  .hero-actions { flex-direction: column; align-items: stretch; }
+  .btn { justify-content: center; }
+  .cta-btns { flex-direction: column; align-items: center; }
+  .sh h2 { font-size: 1.8rem; }
+}
+</style>
+</head>
+<body>
+
+<!-- Nav -->
+<nav>
+  <a href="#" class="nav-logo">
+    <svg width="28" height="28" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <circle cx="26" cy="26" r="15" stroke="#c8a55a" stroke-width="3.5"/>
+      <line x1="37" y1="37" x2="52" y2="52" stroke="#c8a55a" stroke-width="4.5" stroke-linecap="round"/>
+      <circle cx="26" cy="26" r="7" fill="#c8a55a" opacity="0.15"/>
+      <circle cx="23" cy="22" r="2.5" fill="#c8a55a" opacity="0.3"/>
+    </svg>
+    <span>SherlockQA</span>
+  </a>
+  <ul class="nav-links" id="navLinks">
+    <li><a href="#features">Features</a></li>
+    <li><a href="#personalities">Personalities</a></li>
+    <li><a href="#how-it-works">How It Works</a></li>
+    <li><a href="#usage">Usage</a></li>
+    <li><a href="#faq">FAQ</a></li>
+    <li><a href="https://github.com/marketplace/actions/sherlockqa-ai-code-review" class="nav-cta" target="_blank">Get Started</a></li>
+  </ul>
+  <button class="mobile-toggle" id="mobileToggle" aria-label="Menu">
+    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+      <line x1="4" y1="7" x2="20" y2="7"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="17" x2="20" y2="17"/>
+    </svg>
+  </button>
+</nav>
+
+<!-- Hero -->
+<section class="hero" id="hero">
+  <div class="wrap">
+    <div class="hero-content">
+      <div class="hero-eyebrow">GITHUB ACTION</div>
+      <h1>Your code<br>deserves a<br><em>detective's eye</em></h1>
+      <p class="hero-tagline">"Elementary, my dear developer."</p>
+      <p class="hero-desc">
+        SherlockQA reviews your pull requests with AI &mdash; finding bugs, flagging security issues, and suggesting QA scenarios before they hit production.
+      </p>
+      <div class="hero-actions">
+        <a href="https://github.com/marketplace/actions/sherlockqa-ai-code-review" class="btn btn-gold" target="_blank">
+          <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+          Get Started Free
+        </a>
+        <a href="https://github.com/mayurrawte/SherlockQA" class="btn btn-ghost" target="_blank">View Source</a>
+      </div>
+    </div>
+
+    <div class="hero-visual" data-a>
+      <div class="pr-card">
+        <div class="pr-bar">
+          <span class="pr-dot pr-dot-r"></span>
+          <span class="pr-dot pr-dot-y"></span>
+          <span class="pr-dot pr-dot-g"></span>
+          <span class="pr-bar-text">auth-service.ts &middot; PR #42</span>
+        </div>
+        <div>
+          <div class="diff-line diff-ctx"><span class="diff-ln">38</span><span class="diff-code">  async getUser(id: string) {</span></div>
+          <div class="diff-line diff-rm"><span class="diff-ln">39</span><span class="diff-code">-   return db.users.find(id);</span></div>
+          <div class="diff-line diff-add"><span class="diff-ln">40</span><span class="diff-code">+   const user = db.users.find(id);</span></div>
+          <div class="diff-line diff-add"><span class="diff-ln">41</span><span class="diff-code">+   return user.profile;</span></div>
+        </div>
+        <div class="pr-comment">
+          <div class="pr-comment-head">
+            <div class="pr-avi"></div>
+            <strong>SherlockQA</strong>
+            <span class="pr-bot-tag">bot</span>
+          </div>
+          <p><span class="pr-sev">ERROR</span>&ensp;No null check after <code>db.users.find(id)</code>. If the user doesn't exist, accessing <code>.profile</code> on line 41 will throw.</p>
+        </div>
+        <div class="pr-footer">
+          <span class="pr-verdict-dot"></span>
+          <span>Changes requested</span>
+          <small>1 error &middot; 2 QA scenarios</small>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Features -->
+<section class="features" id="features">
+  <div class="wrap">
+    <div class="sh" data-a>
+      <div class="sh-label">CAPABILITIES</div>
+      <h2>Every case, thoroughly<br>investigated</h2>
+      <p>SherlockQA examines your code from every angle &mdash; bugs, security, test gaps, quality.</p>
+    </div>
+    <div class="feat-grid" data-a>
+      <div class="feat"><div class="feat-num">01</div><h3>AI Code Review</h3><p>Finds bugs, security vulnerabilities, and quality issues. Posts inline comments directly on the problematic lines.</p></div>
+      <div class="feat"><div class="feat-num">02</div><h3>QA Test Scenarios</h3><p>Suggests manual test cases for your changes. Remembers which scenarios were already checked across PR updates.</p></div>
+      <div class="feat"><div class="feat-num">03</div><h3>Smart Verdicts</h3><p>Approve, Request Changes, or Do Not Merge &mdash; each with a clear reason. Can auto-approve clean PRs.</p></div>
+      <div class="feat"><div class="feat-num">04</div><h3>5 Personalities</h3><p>Detective, Bro, Desi, Professional, Enthusiastic. Same analysis, different tone. Pick what fits your team.</p></div>
+      <div class="feat"><div class="feat-num">05</div><h3>Configurable Strictness</h3><p>Lenient for fast shipping, Balanced for everyday, Strict for critical code. Adjust the bar per-repo.</p></div>
+      <div class="feat"><div class="feat-num">06</div><h3>Multi-Provider</h3><p>Works with OpenAI and Azure OpenAI. Bring your own key and pick your model.</p></div>
+    </div>
+  </div>
+</section>
+
+<!-- Personalities -->
+<section class="personality" id="personalities">
+  <div class="wrap">
+    <div class="sh" data-a>
+      <div class="sh-label">PERSONALITIES</div>
+      <h2>Same bug. Five different<br>detectives.</h2>
+      <p>Pick the voice that fits your team. Click each to see how they flag the same issue.</p>
+    </div>
+    <div class="p-demo" data-a>
+      <div class="p-tabs" id="pTabs">
+        <button class="p-tab on" data-p="detective">Detective</button>
+        <button class="p-tab" data-p="bro">Bro</button>
+        <button class="p-tab" data-p="desi">Desi</button>
+        <button class="p-tab" data-p="professional">Professional</button>
+        <button class="p-tab" data-p="enthusiastic">Enthusiastic</button>
+      </div>
+      <div class="p-card">
+        <div class="p-card-head">
+          <div class="pr-avi"></div>
+          <span class="p-card-name">SherlockQA</span>
+          <span class="p-card-mode" id="pMode">detective</span>
+        </div>
+        <div class="p-card-code">
+          <div class="diff-line diff-add"><span class="diff-ln">41</span><span class="diff-code">+   return user.profile;</span></div>
+        </div>
+        <div class="p-card-body">
+          <div class="p-sev" id="pSev">ERROR</div>
+          <div class="p-text" id="pText">I deduce this null check is missing, Watson! The evidence suggests a potential NullPointerException at line 42.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Review Preview -->
+<section class="review-preview" id="review-preview">
+  <div class="wrap">
+    <div class="sh" style="text-align:center;" data-a>
+      <div class="sh-label" style="justify-content:center;">REVIEW OUTPUT</div>
+      <h2 style="margin:0 auto 0.5rem;">What you get on every PR</h2>
+      <p style="margin:0 auto;">A complete review posted as a comment &mdash; verdict, summary, QA checklist, and code quality notes.</p>
+    </div>
+    <div class="review-mockup" data-a>
+      <div class="review-mockup-bar">
+        <div class="pr-avi"></div>
+        <span>SherlockQA</span>
+        <span class="pr-bot-tag">bot</span>
+        <small>reviewed just now</small>
+      </div>
+      <div class="review-body">
+        <h4>SherlockQA's Review</h4>
+        <div class="review-verdict-bar">
+          <span class="vd">Approved</span>
+          <span class="vs">0 issues &middot; 2 QA scenarios</span>
+        </div>
+        <div class="review-summary">
+          <strong>Summary:</strong> Adds user authentication with JWT tokens and session management.
+        </div>
+        <div class="review-qa">
+          <div class="review-qa-title">QA SCENARIOS (2)</div>
+          <ul>
+            <li>Test login with invalid credentials returns 401</li>
+            <li>Test token expiration after 24 hours forces re-login</li>
+          </ul>
+        </div>
+        <div class="review-quality">
+          Elementary! Clean token handling. The validation function is well-structured and follows security best practices.
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- How it works -->
+<section class="how" id="how-it-works">
+  <div class="wrap">
+    <div class="sh" data-a>
+      <div class="sh-label">SETUP</div>
+      <h2>Running in two minutes</h2>
+      <p>No servers. No config files. Just a workflow YAML and you're investigating.</p>
+    </div>
+    <div class="how-steps" data-a>
+      <div class="how-step">
+        <div class="how-step-n">01</div>
+        <h3>Add the Action</h3>
+        <p>Drop a workflow YAML into <code style="font-family:var(--font-mono);font-size:0.82rem;color:var(--accent);">.github/workflows/</code> &mdash; SherlockQA plugs right in.</p>
+      </div>
+      <div class="how-step">
+        <div class="how-step-n">02</div>
+        <h3>Open a PR</h3>
+        <p>Push your changes and open a pull request. SherlockQA triggers automatically.</p>
+      </div>
+      <div class="how-step">
+        <div class="how-step-n">03</div>
+        <h3>Get the Review</h3>
+        <p>Inline comments, QA scenarios, and a verdict &mdash; posted to your PR in seconds.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Quick Start -->
+<section class="quickstart" id="quickstart">
+  <div class="wrap">
+    <div class="qs-layout">
+      <div class="qs-text" data-a>
+        <div class="sh">
+          <div class="sh-label">QUICK START</div>
+          <h2>Copy, paste,<br>investigate</h2>
+        </div>
+        <div class="qs-file">sherlock.yml</div>
+        <p class="qs-note">Add this file to <code style="font-family:var(--font-mono);font-size:0.82rem;color:var(--accent);">.github/workflows/</code> in your repository. Set your OpenAI key as a repo secret and you're done.</p>
+        <p class="qs-note">Customize the personality, strictness, and dozens of other options to match your team's workflow.</p>
+      </div>
+      <div data-a>
+        <div class="code-block">
+          <div class="code-bar">
+            <div class="code-bar-left">
+              <span class="pr-dot pr-dot-r" style="width:8px;height:8px;"></span>
+              <span class="pr-dot pr-dot-y" style="width:8px;height:8px;"></span>
+              <span class="pr-dot pr-dot-g" style="width:8px;height:8px;"></span>
+              <span class="code-bar-file">sherlock.yml</span>
+            </div>
+            <button class="code-copy-btn" onclick="copyCode()" id="copyBtn">Copy</button>
+          </div>
+          <pre class="code-pre" id="codeContent"><span class="k">name</span>: <span class="s">SherlockQA Review</span>
+
+<span class="k">on</span>:
+  <span class="k">pull_request</span>:
+    <span class="k">types</span>: [<span class="v">opened</span>, <span class="v">synchronize</span>, <span class="v">reopened</span>]
+
+<span class="k">permissions</span>:
+  <span class="k">contents</span>: <span class="v">read</span>
+  <span class="k">pull-requests</span>: <span class="v">write</span>
+
+<span class="k">jobs</span>:
+  <span class="k">review</span>:
+    <span class="k">runs-on</span>: <span class="s">ubuntu-latest</span>
+    <span class="k">steps</span>:
+      - <span class="k">uses</span>: <span class="s">mayurrawte/SherlockQA@v1</span>
+        <span class="k">with</span>:
+          <span class="k">openai-api-key</span>: <span class="p">${{ secrets.OPENAI_API_KEY }}</span>
+          <span class="k">personality</span>: <span class="s">detective</span>
+          <span class="k">review-strictness</span>: <span class="s">balanced</span></pre>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Usage Examples -->
+<section class="usage" id="usage">
+  <div class="wrap">
+    <div class="sh" style="text-align:center;" data-a>
+      <div class="sh-label" style="justify-content:center;">USAGE EXAMPLES</div>
+      <h2 style="margin:0 auto 0.5rem;">Fits any setup</h2>
+      <p style="margin:0 auto;">OpenAI, Azure, custom domains &mdash; pick the config that matches your stack.</p>
+    </div>
+    <div data-a>
+      <div class="usage-tabs" id="uTabs">
+        <button class="usage-tab on" data-u="openai">OpenAI</button>
+        <button class="usage-tab" data-u="azure">Azure OpenAI</button>
+        <button class="usage-tab" data-u="domain">Domain Knowledge</button>
+        <button class="usage-tab" data-u="full">Full Config</button>
+      </div>
+      <div class="usage-panels" id="uPanels">
+        <div class="usage-panel on" data-u="openai">
+          <div class="code-block" style="border-radius:0 0 10px 10px;border-top:none;">
+            <pre class="code-pre">- <span class="k">uses</span>: <span class="s">mayurrawte/SherlockQA@v1</span>
+  <span class="k">with</span>:
+    <span class="k">openai-api-key</span>: <span class="p">${{ secrets.OPENAI_API_KEY }}</span>
+    <span class="k">model</span>: <span class="s">gpt-4</span></pre>
+          </div>
+        </div>
+        <div class="usage-panel" data-u="azure">
+          <div class="code-block" style="border-radius:0 0 10px 10px;border-top:none;">
+            <pre class="code-pre">- <span class="k">uses</span>: <span class="s">mayurrawte/SherlockQA@v1</span>
+  <span class="k">with</span>:
+    <span class="k">ai-provider</span>: <span class="s">azure</span>
+    <span class="k">azure-api-key</span>: <span class="p">${{ secrets.AZURE_OPENAI_KEY }}</span>
+    <span class="k">azure-endpoint</span>: <span class="s">https://your-resource.openai.azure.com</span>
+    <span class="k">azure-deployment</span>: <span class="s">gpt-4</span></pre>
+          </div>
+        </div>
+        <div class="usage-panel" data-u="domain">
+          <div class="code-block" style="border-radius:0 0 10px 10px;border-top:none;">
+            <pre class="code-pre">- <span class="k">uses</span>: <span class="s">mayurrawte/SherlockQA@v1</span>
+  <span class="k">with</span>:
+    <span class="k">openai-api-key</span>: <span class="p">${{ secrets.OPENAI_API_KEY }}</span>
+    <span class="k">domain-knowledge</span>: |
+      <span class="c">Fintech payment processing platform.</span>
+      <span class="c">Watch for: currency rounding, timezone</span>
+      <span class="c">issues, PCI compliance, idempotency</span>
+      <span class="c">in payment endpoints.</span></pre>
+          </div>
+        </div>
+        <div class="usage-panel" data-u="full">
+          <div class="code-block" style="border-radius:0 0 10px 10px;border-top:none;">
+            <pre class="code-pre">- <span class="k">uses</span>: <span class="s">mayurrawte/SherlockQA@v1</span>
+  <span class="k">with</span>:
+    <span class="k">openai-api-key</span>: <span class="p">${{ secrets.OPENAI_API_KEY }}</span>
+    <span class="k">model</span>: <span class="s">gpt-4</span>
+    <span class="k">personality</span>: <span class="s">detective</span>
+    <span class="k">review-strictness</span>: <span class="s">strict</span>
+    <span class="k">review-style</span>: <span class="s">detailed</span>
+    <span class="k">auto-approve</span>: <span class="v">true</span>
+    <span class="k">code-quality</span>: <span class="v">true</span>
+    <span class="k">min-severity</span>: <span class="s">suggestion</span>
+    <span class="k">ignore-patterns</span>: <span class="s">*.md,*.txt,*.lock</span></pre>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Strictness Levels -->
+<section class="strictness" id="strictness">
+  <div class="wrap">
+    <div class="sh" data-a>
+      <div class="sh-label">STRICTNESS</div>
+      <h2>Set the bar for<br>your team</h2>
+      <p>Three levels of scrutiny. Pick one, or change it per-repo.</p>
+    </div>
+    <div class="strict-grid" data-a>
+      <div class="strict-card">
+        <div class="strict-card-head">
+          <span class="strict-dot" style="background:var(--green);"></span>
+          <h4>Lenient</h4>
+        </div>
+        <div class="strict-card-body">
+          <p>Only flags what truly matters. Ideal for fast-moving teams and small fixes.</p>
+          <ul class="strict-list">
+            <li>Critical bugs and crashes</li>
+            <li>Real security vulnerabilities</li>
+            <li>Skips style, tests, minor issues</li>
+          </ul>
+        </div>
+        <div class="strict-bar"><span>Approval bar</span><span>Low</span></div>
+      </div>
+      <div class="strict-card" style="border-color:var(--accent-mid);">
+        <div class="strict-card-head">
+          <span class="strict-dot" style="background:var(--accent);"></span>
+          <h4>Balanced</h4>
+        </div>
+        <div class="strict-card-body">
+          <p>The default. Catches real problems without nitpicking your semicolons.</p>
+          <ul class="strict-list">
+            <li>Null checks, edge cases, logic errors</li>
+            <li>Security vulnerabilities</li>
+            <li>Breaking changes flagged</li>
+          </ul>
+        </div>
+        <div class="strict-bar"><span>Approval bar</span><span>Medium</span></div>
+      </div>
+      <div class="strict-card">
+        <div class="strict-card-head">
+          <span class="strict-dot" style="background:var(--red);"></span>
+          <h4>Strict</h4>
+        </div>
+        <div class="strict-card-body">
+          <p>Thorough analysis for mission-critical code. Nothing gets past.</p>
+          <ul class="strict-list">
+            <li>Performance, complexity, race conditions</li>
+            <li>Test coverage, code quality</li>
+            <li>3&ndash;5 QA scenarios per review</li>
+          </ul>
+        </div>
+        <div class="strict-bar"><span>Approval bar</span><span>High</span></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Configuration -->
+<section class="config" id="config">
+  <div class="wrap">
+    <div class="sh" data-a>
+      <div class="sh-label">CONFIGURATION</div>
+      <h2>Fine-tune the investigation</h2>
+      <p>Every parameter gives you control over how SherlockQA analyses your code.</p>
+    </div>
+    <div class="config-list" data-a>
+      <div class="config-row"><div class="config-key">personality</div><div class="config-val">Reviewer's tone and voice</div><div class="config-def">detective</div></div>
+      <div class="config-row"><div class="config-key">review-strictness</div><div class="config-val">How critical the review is</div><div class="config-def">balanced</div></div>
+      <div class="config-row"><div class="config-key">review-style</div><div class="config-val">Compact or detailed output</div><div class="config-def">compact</div></div>
+      <div class="config-row"><div class="config-key">auto-approve</div><div class="config-val">Auto-approve clean PRs</div><div class="config-def">false</div></div>
+      <div class="config-row"><div class="config-key">code-quality</div><div class="config-val">Enable quality analysis</div><div class="config-def">false</div></div>
+      <div class="config-row"><div class="config-key">min-severity</div><div class="config-val">Minimum issue severity</div><div class="config-def">warning</div></div>
+      <div class="config-row"><div class="config-key">domain-knowledge</div><div class="config-val">Domain-specific context</div><div class="config-def">optional</div></div>
+      <div class="config-row"><div class="config-key">persona</div><div class="config-val">Custom reviewer instructions</div><div class="config-def">optional</div></div>
+      <div class="config-row"><div class="config-key">ignore-patterns</div><div class="config-val">Files to skip in review</div><div class="config-def">*.md, *.txt ...</div></div>
+    </div>
+  </div>
+</section>
+
+<!-- Languages -->
+<section class="languages" id="languages">
+  <div class="wrap">
+    <div class="sh" style="text-align:center;" data-a>
+      <div class="sh-label" style="justify-content:center;">SUPPORTED LANGUAGES</div>
+      <h2 style="margin:0 auto 0.5rem;">Works with your stack</h2>
+      <p style="margin:0 auto;">Enhanced support for these &mdash; works with any language.</p>
+    </div>
+    <div class="lang-row" data-a>
+      <div class="lang-tag"><span class="lang-dot" style="background:#3572A5;"></span>Python</div>
+      <div class="lang-tag"><span class="lang-dot" style="background:#f1e05a;"></span>JavaScript</div>
+      <div class="lang-tag"><span class="lang-dot" style="background:#3178c6;"></span>TypeScript</div>
+      <div class="lang-tag"><span class="lang-dot" style="background:#00ADD8;"></span>Go</div>
+      <div class="lang-tag"><span class="lang-dot" style="background:#b07219;"></span>Java</div>
+      <div class="lang-tag"><span class="lang-dot" style="background:#178600;"></span>C#</div>
+      <div class="lang-tag"><span class="lang-dot" style="background:#CC342D;"></span>Ruby</div>
+      <div class="lang-tag"><span class="lang-dot" style="background:#4F5D95;"></span>PHP</div>
+      <div class="lang-tag"><span class="lang-dot" style="background:#dea584;"></span>Rust</div>
+    </div>
+  </div>
+</section>
+
+<!-- Privacy -->
+<section class="privacy" id="privacy">
+  <div class="wrap">
+    <div class="sh" data-a>
+      <div class="sh-label">PRIVACY &amp; SECURITY</div>
+      <h2>Your code stays yours</h2>
+      <p>SherlockQA is transparent about what it reads and where data goes.</p>
+    </div>
+    <div class="privacy-grid" data-a>
+      <div class="privacy-card">
+        <h4>Reads diffs only</h4>
+        <p>SherlockQA only reads the PR diff &mdash; never your entire codebase, secrets, or environment variables.</p>
+      </div>
+      <div class="privacy-card">
+        <h4>Your AI provider</h4>
+        <p>Code is sent to <em>your</em> configured OpenAI or Azure endpoint. SherlockQA never stores or logs any code.</p>
+      </div>
+      <div class="privacy-card">
+        <h4>Open source</h4>
+        <p>The entire action is MIT-licensed and open source. Audit every line on GitHub before using it.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- FAQ -->
+<section class="faq" id="faq">
+  <div class="wrap">
+    <div class="sh" style="text-align:center;" data-a>
+      <div class="sh-label" style="justify-content:center;">FAQ</div>
+      <h2 style="margin:0 auto 0.5rem;">Common questions</h2>
+    </div>
+    <div class="faq-list" data-a>
+      <div class="faq-item">
+        <button class="faq-q">Does it work with private repositories?<svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke="currentColor"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>
+        <div class="faq-a"><div class="faq-a-inner">Yes. SherlockQA runs as a GitHub Action inside your own repository's workflow. It uses your <code>GITHUB_TOKEN</code> to access the PR diff, so private repos work out of the box.</div></div>
+      </div>
+      <div class="faq-item">
+        <button class="faq-q">Which AI providers are supported?<svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke="currentColor"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>
+        <div class="faq-a"><div class="faq-a-inner">OpenAI (default), Azure OpenAI Chat Completions, and Azure Responses API. Set <code>ai-provider</code> to <code>openai</code>, <code>azure</code>, or <code>azure-responses</code>.</div></div>
+      </div>
+      <div class="faq-item">
+        <button class="faq-q">Why isn't auto-approve working?<svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke="currentColor"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>
+        <div class="faq-a"><div class="faq-a-inner">By default, GitHub Actions using <code>GITHUB_TOKEN</code> can't approve PRs. Go to Settings &rarr; Actions &rarr; General &rarr; check "Allow GitHub Actions to create and approve pull requests". Alternatively, use a Personal Access Token with <code>repo</code> scope.</div></div>
+      </div>
+      <div class="faq-item">
+        <button class="faq-q">Can I customise what it reviews?<svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke="currentColor"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>
+        <div class="faq-a"><div class="faq-a-inner">Yes. Use <code>ignore-patterns</code> to skip files (e.g. lockfiles, docs), <code>domain-knowledge</code> to give domain-specific context, and <code>persona</code> to define a custom reviewer role like "Act as a security engineer".</div></div>
+      </div>
+      <div class="faq-item">
+        <button class="faq-q">What happens when a PR is updated?<svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke="currentColor"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>
+        <div class="faq-a"><div class="faq-a-inner">SherlockQA automatically dismisses its previous review and posts a fresh one. Any QA scenarios you already checked off are preserved in the new review &mdash; no lost progress.</div></div>
+      </div>
+      <div class="faq-item">
+        <button class="faq-q">Is it free?<svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke="currentColor"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>
+        <div class="faq-a"><div class="faq-a-inner">SherlockQA itself is free and open source (MIT). You only pay for the AI API calls to your provider (OpenAI, Azure). The action runs on GitHub's free Actions minutes.</div></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- CTA -->
+<section class="cta">
+  <div class="wrap">
+    <div class="cta-inner" data-a>
+      <h2>The game is <em>afoot</em></h2>
+      <p>Free, open-source, and running in two minutes. Start getting AI-powered reviews on every PR.</p>
+      <div class="cta-btns">
+        <a href="https://github.com/marketplace/actions/sherlockqa-ai-code-review" class="btn btn-gold" target="_blank">
+          <svg viewBox="0 0 16 16" fill="currentColor" width="16" height="16"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+          Get on Marketplace
+        </a>
+        <a href="https://github.com/mayurrawte/SherlockQA" class="btn btn-ghost" target="_blank">Star on GitHub</a>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Footer -->
+<footer>
+  <div class="wrap footer-inner">
+    <div>MIT License &middot; Made by <a href="https://github.com/mayurrawte" target="_blank">mayurrawte</a></div>
+    <div class="footer-r">
+      <a href="https://github.com/mayurrawte/SherlockQA" target="_blank">GitHub</a>
+      <a href="https://github.com/marketplace/actions/sherlockqa-ai-code-review" target="_blank">Marketplace</a>
+    </div>
+  </div>
+</footer>
+
+<script>
+// Scroll reveal
+const obs = new IntersectionObserver(entries => {
+  entries.forEach(e => { if (e.isIntersecting) e.target.classList.add('in'); });
+}, { threshold: 0.12 });
+document.querySelectorAll('[data-a]').forEach(el => obs.observe(el));
+
+// Nav
+window.addEventListener('scroll', () => {
+  document.querySelector('nav').style.borderBottomColor =
+    window.scrollY > 30 ? 'var(--border-light)' : 'var(--border)';
+});
+
+// Mobile menu
+document.getElementById('mobileToggle').addEventListener('click', () => {
+  document.getElementById('navLinks').classList.toggle('open');
+});
+document.querySelectorAll('#navLinks a').forEach(a => {
+  a.addEventListener('click', () => document.getElementById('navLinks').classList.remove('open'));
+});
+
+// Personality tabs
+const pData = {
+  detective: "I deduce this null check is missing, Watson! The evidence suggests a potential NullPointerException at line 42.",
+  bro: "bro what is this \u{1F480} you're not checking for null here... this is gonna blow up in prod lol",
+  desi: "arre yaar yeh kya likha hai \u{1F602} null check toh daal de bhai, production mein fat jayega",
+  professional: "A null check is required at line 42. The current implementation may throw a NullPointerException under certain conditions.",
+  enthusiastic: "Ooh, I spotted something! \u{1F50D} Adding a null check at line 42 would make this code bulletproof! You're so close to perfection! \u2728",
+};
+
+document.getElementById('pTabs').addEventListener('click', e => {
+  const tab = e.target.closest('.p-tab');
+  if (!tab) return;
+  const key = tab.dataset.p;
+  if (!pData[key]) return;
+  document.querySelectorAll('#pTabs .p-tab').forEach(t => t.classList.remove('on'));
+  tab.classList.add('on');
+  const textEl = document.getElementById('pText');
+  textEl.style.opacity = 0;
+  setTimeout(() => {
+    textEl.textContent = pData[key];
+    document.getElementById('pMode').textContent = key;
+    textEl.style.opacity = 1;
+  }, 150);
+});
+
+// Usage tabs
+document.getElementById('uTabs').addEventListener('click', e => {
+  const tab = e.target.closest('.usage-tab');
+  if (!tab) return;
+  const key = tab.dataset.u;
+  document.querySelectorAll('#uTabs .usage-tab').forEach(t => t.classList.remove('on'));
+  tab.classList.add('on');
+  document.querySelectorAll('#uPanels .usage-panel').forEach(p => p.classList.remove('on'));
+  document.querySelector('#uPanels .usage-panel[data-u="' + key + '"]').classList.add('on');
+});
+
+// FAQ accordion
+document.querySelectorAll('.faq-q').forEach(btn => {
+  btn.addEventListener('click', () => {
+    const item = btn.parentElement;
+    const a = item.querySelector('.faq-a');
+    const isOpen = item.classList.contains('open');
+
+    // Close all
+    document.querySelectorAll('.faq-item').forEach(i => {
+      i.classList.remove('open');
+      i.querySelector('.faq-a').style.maxHeight = null;
+    });
+
+    if (!isOpen) {
+      item.classList.add('open');
+      a.style.maxHeight = a.scrollHeight + 'px';
+    }
+  });
+});
+
+// Copy
+function copyCode() {
+  const raw = `name: SherlockQA Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: mayurrawte/SherlockQA@v1
+        with:
+          openai-api-key: \${{ secrets.OPENAI_API_KEY }}
+          personality: detective
+          review-strictness: balanced`;
+
+  navigator.clipboard.writeText(raw).then(() => {
+    const btn = document.getElementById('copyBtn');
+    btn.textContent = 'Copied!';
+    setTimeout(() => { btn.textContent = 'Copy'; }, 1500);
+  });
+}
+</script>
+</body>
+</html>
