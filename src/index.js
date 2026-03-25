@@ -338,13 +338,14 @@ function buildSystemPrompt(persona, domainKnowledge, codeQuality, personality = 
 - If code is good: "bas, perfect hai! 🚀", "ekdum mast, chal ship karte hai", "sahi hai bhai!"
 - If issues: "arre yaar yeh kya ho gaya", "bhai isko dekh le ek baar", "thoda issue hai yaar"`,
 
-    professional: `You are SherlockQA - a thorough but efficient code reviewer.
+    professional: `You are SherlockQA - a senior engineer who reviews code the way busy developers want: fast, sharp, no fluff.
 
 ## Your Personality:
-- Be clear, direct, and professional
-- Focus on facts and actionable feedback
-- Keep language formal but not cold
-- Example: "The implementation is sound. One consideration: error handling for edge case X."`,
+- Lead with the verdict, explain only what matters
+- Every sentence must be actionable or informative — no filler, no generic praise, no narrating the diff
+- If the code is fine, say so in one line and move on. Do not pad the review.
+- When flagging issues, state the problem and the consequence: "X will cause Y"
+- Never repeat the same point in summary, verdict_reason, or comments — each field adds new information or says nothing`,
 
     enthusiastic: `You are SherlockQA - that super positive teammate who gets genuinely excited about good code!
 
@@ -361,7 +362,7 @@ function buildSystemPrompt(persona, domainKnowledge, codeQuality, personality = 
   prompt += `
 - Keep reviews concise - developers be busy folks
 - Don't nitpick style - focus on real problems
-- IMPORTANT: Use your personality voice for ALL fields - summary, analysis, verdict_reason, comments. Stay in character!`;
+- IMPORTANT: Use your personality voice for ALL fields - summary, verdict_reason, comments. Stay in character!`;
 
   // Add domain knowledge if provided
   if (domainKnowledge) {
@@ -427,12 +428,11 @@ Respond with this JSON:
   // Add code quality to output format if enabled
   if (codeQuality) {
     prompt += `
-  "code_quality": "One friendly sentence about code quality - be human, use a light pun if appropriate",`;
+  "code_quality": "Only if there's a real issue (duplication, complexity, maintainability concern). Set to null if code is fine.",`;
   }
 
   prompt += `
   "questions": [],
-  "analysis": "2-3 sentences explaining what you reviewed and key observations about the changes",
   "verdict": "approved|needs_changes|do_not_merge",
   "verdict_reason": "One sentence explaining WHY this verdict - what made you approve/reject"
 }
@@ -454,11 +454,15 @@ Respond with this JSON:
 - **qa_scenarios**: 2-3 scenarios covering main flows and important edge cases.
 - **questions**: Ask if something is unclear or seems wrong.
 - **verdict**: "approved" if no significant issues. Be fair - flag real problems, but don't block good code.`}
-- **analysis**: 2-3 sentences about what you observed in the code. Use your personality voice!
-- **verdict_reason**: One clear sentence explaining WHY you gave this verdict. Stay in character!`;
+- **line_comments**: Each issue mentioned ONCE. Do not repeat the same finding on different lines — group related issues into one comment on the most relevant line.
+- **qa_scenarios**: Empty array for trivial changes (config, CI, docs, renaming, formatting). Only include scenarios when there's actual behavior to test.
+- **verdict_reason**: One clear sentence explaining WHY you gave this verdict. Stay in character!
+- **summary and verdict_reason must not say the same thing.** Summary = what changed. Verdict_reason = why you approved/rejected.
+- **Clean approvals should be minimal.** If approved with 0 issues: set verdict_reason to a short phrase like "Good to go", "Looks good", or "Ship it". No lengthy explanations for clean code.
+- **When there ARE issues:** verdict_reason should clearly state what needs to be fixed and why — helpful for both the reviewer and the PR author.`;
 
   if (codeQuality) {
-    prompt += '\n- **code_quality**: ONE sentence, friendly tone. Example: "Clean and readable!" or "Solid work - no concerns here!"';
+    prompt += '\n- **code_quality**: Only include if there is an actionable problem (duplication, high complexity, maintainability risk). Set to null if code quality is fine — do NOT fill this with generic praise.';
   }
 
   return prompt;
@@ -567,28 +571,32 @@ function buildReviewBody(review, prAuthor, previousCheckedScenarios = new Set(),
   const parts = [];
 
   if (reviewStyle === 'compact') {
+    const isCleanApproval = review.verdict === 'approved' && issueCount === 0 && questionCount === 0;
+
     // Compact: Verdict at top with stats
     parts.push(`## ${e.detective} SherlockQA's Review\n`);
     parts.push(`**Verdict:** ${verdictEmoji[review.verdict] || e.needs_changes} ${verdictText[review.verdict] || review.verdict} | ${issueCount} issues · ${qaCount} QA scenarios${questionCount > 0 ? ` · ${questionCount} questions` : ''}\n`);
 
-    // Verdict reason - why approved/rejected
-    if (review.verdict_reason) {
-      parts.push(`> ${review.verdict_reason}\n`);
+    if (isCleanApproval) {
+      // Clean approval: verdict_reason as the one-liner, summary in blockquote for context
+      if (review.verdict_reason) {
+        parts.push(`> ${review.verdict_reason}\n`);
+      }
+      parts.push(`${review.summary || ''}\n`);
+    } else {
+      // Has issues: show full detail
+      if (review.verdict_reason) {
+        parts.push(`> ${review.verdict_reason}\n`);
+      }
+      parts.push(`**Summary:** ${review.summary || 'No summary'}\n`);
     }
 
-    parts.push(`**Summary:** ${review.summary || 'No summary'}\n`);
-
-    // Analysis - detailed observations about the changes
-    if (review.analysis) {
-      parts.push(`**Analysis:** ${review.analysis}\n`);
-    }
-
-    // Code quality as single line if present
-    if (review.code_quality) {
+    // Code quality - only shown when there's an actual issue (null/empty = skip)
+    if (review.code_quality && review.code_quality !== 'null') {
       const qualityText = typeof review.code_quality === 'string'
         ? review.code_quality
         : review.code_quality.summary || '';
-      if (qualityText) {
+      if (qualityText && qualityText !== 'null') {
         parts.push(`**Code Quality:** ${qualityText}\n`);
       }
     }
@@ -601,7 +609,7 @@ function buildReviewBody(review, prAuthor, previousCheckedScenarios = new Set(),
       parts.push(`</details>\n`);
     }
 
-    // QA scenarios in collapsible
+    // QA scenarios in collapsible - skip for clean approvals with no scenarios
     if (review.qa_scenarios?.length > 0) {
       parts.push(`<details>`);
       parts.push(`<summary>${e.qa} <b>QA Scenarios (${qaCount})</b></summary>\n`);
@@ -622,11 +630,6 @@ function buildReviewBody(review, prAuthor, previousCheckedScenarios = new Set(),
     // Detailed: Original format
     parts.push(`## ${e.detective} SherlockQA's Review\n`);
     parts.push(`### ${e.summary} Summary\n${review.summary || 'No summary'}\n`);
-
-    // Analysis - detailed observations
-    if (review.analysis) {
-      parts.push(`### 🔬 Analysis\n${review.analysis}\n`);
-    }
 
     if (review.tests_required && review.test_suggestion) {
       parts.push(`### ${e.tests} Tests Required`);
@@ -650,12 +653,12 @@ function buildReviewBody(review, prAuthor, previousCheckedScenarios = new Set(),
       parts.push('');
     }
 
-    if (review.code_quality) {
-      parts.push(`### ${e.quality} Code Quality`);
+    if (review.code_quality && review.code_quality !== 'null') {
       const qualityText = typeof review.code_quality === 'string'
         ? review.code_quality
         : review.code_quality.summary || '';
-      if (qualityText) {
+      if (qualityText && qualityText !== 'null') {
+        parts.push(`### ${e.quality} Code Quality`);
         parts.push(`${qualityText}\n`);
       }
       if (typeof review.code_quality === 'object' && review.code_quality.issues?.length > 0) {
