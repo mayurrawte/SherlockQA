@@ -1,5 +1,5 @@
 name: 'SherlockQA-AI'
-description: 'AI-powered code review and QA that finds bugs, security issues, and suggests test scenarios'
+description: 'AI-powered code review and QA that finds bugs, security issues, and suggests test scenarios. Works with OpenAI, Anthropic Claude, Google Gemini, Azure OpenAI, and Ollama.'
 author: 'mayurrawte'
 
 branding:
@@ -14,22 +14,37 @@ inputs:
 
   # AI Provider
   ai-provider:
-    description: 'AI provider to use (openai, azure, azure-responses)'
+    description: 'AI provider: openai, anthropic, gemini, azure, azure-responses, ollama'
     required: false
     default: 'openai'
 
   # OpenAI Configuration
   openai-api-key:
-    description: 'OpenAI API key'
+    description: 'OpenAI API key (required if ai-provider=openai)'
     required: false
   model:
-    description: 'Model to use for review'
+    description: 'Model to use. Defaults: openai=gpt-4o-mini, anthropic=claude-sonnet-4-5, gemini=gemini-2.0-flash, ollama=llama3.1'
     required: false
-    default: 'gpt-4'
+
+  # Anthropic Configuration
+  anthropic-api-key:
+    description: 'Anthropic API key (required if ai-provider=anthropic)'
+    required: false
+
+  # Google Gemini Configuration
+  gemini-api-key:
+    description: 'Google AI Studio / Gemini API key (required if ai-provider=gemini)'
+    required: false
+
+  # Ollama Configuration (local / self-hosted)
+  ollama-base-url:
+    description: 'Ollama server base URL (default: http://localhost:11434). Only useful if your runner can reach an Ollama instance.'
+    required: false
+    default: 'http://localhost:11434'
 
   # Azure OpenAI Configuration
   azure-api-key:
-    description: 'Azure OpenAI API key'
+    description: 'Azure OpenAI API key (required if ai-provider=azure or azure-responses)'
     required: false
   azure-endpoint:
     description: 'Azure OpenAI endpoint URL (e.g., https://your-resource.openai.azure.com)'
@@ -43,12 +58,16 @@ inputs:
     default: '2024-02-15-preview'
 
   # Review Configuration
+  mode:
+    description: 'Review mode: general (default) or security (audit for vulnerabilities only)'
+    required: false
+    default: 'general'
   min-severity:
     description: 'Minimum severity to report (error, warning, suggestion)'
     required: false
     default: 'warning'
   ignore-patterns:
-    description: 'Comma-separated list of file patterns to ignore'
+    description: 'Comma-separated list of file patterns to ignore. Supports glob (*, **, ?).'
     required: false
     default: '*.md,*.txt,package-lock.json,yarn.lock'
 

@@ -1,29 +1,43 @@
+const fs = require('fs');
+const path = require('path');
 const core = require('@actions/core');
 const github = require('@actions/github');
 const OpenAI = require('openai');
+const yaml = require('js-yaml');
 
 async function run() {
   try {
-    // Get inputs
-    const githubToken = core.getInput('github-token', { required: true });
-    const aiProvider = core.getInput('ai-provider') || 'openai';
-    const model = core.getInput('model') || 'gpt-4';
-    const minSeverity = core.getInput('min-severity') || 'warning';
-    const ignorePatterns = (core.getInput('ignore-patterns') || '').split(',').map(p => p.trim()).filter(Boolean);
-    const persona = core.getInput('persona') || '';
-    const domainKnowledge = core.getInput('domain-knowledge') || '';
-    const maxTokens = parseInt(core.getInput('max-tokens') || '4096', 10);
-    const autoApprove = core.getInput('auto-approve') === 'true';
-    const codeQuality = core.getInput('code-quality') === 'true';
-    const reviewStyle = core.getInput('review-style') || 'compact';
-    const useEmoji = core.getInput('use-emoji') !== 'false';
-    const personality = core.getInput('personality') || 'detective';
-    const reviewStrictness = core.getInput('review-strictness') || 'balanced';
+    // Load .sherlockqa.yml from the workspace if present. Action inputs always win.
+    const repoConfig = loadRepoConfig();
 
-    // Validate we're running on a PR
+    const getInput = (name, opts = {}) => {
+      const fromAction = core.getInput(name, opts);
+      if (fromAction !== '' && fromAction != null) return fromAction;
+      const fromConfig = repoConfig[name];
+      if (fromConfig != null) return String(fromConfig);
+      return '';
+    };
+
+    const githubToken = core.getInput('github-token', { required: true });
+    const aiProvider = getInput('ai-provider') || 'openai';
+    const model = getInput('model') || defaultModelFor(aiProvider);
+    const minSeverity = getInput('min-severity') || 'warning';
+    const ignorePatterns = (getInput('ignore-patterns') || '')
+      .split(',').map(p => p.trim()).filter(Boolean);
+    const persona = getInput('persona') || '';
+    const domainKnowledge = getInput('domain-knowledge') || '';
+    const maxTokens = parseInt(getInput('max-tokens') || '4096', 10);
+    const autoApprove = getInput('auto-approve') === 'true';
+    const codeQuality = getInput('code-quality') === 'true';
+    const reviewStyle = getInput('review-style') || 'compact';
+    const useEmoji = getInput('use-emoji') !== 'false';
+    const personality = getInput('personality') || 'detective';
+    const reviewStrictness = getInput('review-strictness') || 'balanced';
+    const mode = getInput('mode') || 'general';
+
     const context = github.context;
-    if (context.eventName !== 'pull_request') {
-      core.setFailed('This action only works on pull_request events');
+    if (context.eventName !== 'pull_request' && context.eventName !== 'pull_request_target') {
+      core.setFailed('This action only works on pull_request / pull_request_target events');
       return;
     }
 
@@ -33,184 +47,187 @@ async function run() {
     const prAuthor = context.payload.pull_request.user.login;
     const commitSha = context.payload.pull_request.head.sha;
 
-    core.info(`Reviewing PR #${prNumber} by @${prAuthor}`);
+    core.info(`Reviewing PR #${prNumber} by @${prAuthor} (provider=${aiProvider}, model=${model}, mode=${mode})`);
 
-    // Find and dismiss previous SherlockQA review, preserving checked scenarios
     const previousCheckedScenarios = await findAndDismissPreviousReview(octokit, owner, repo, prNumber);
 
-    // Get PR diff
     const { data: diff } = await octokit.rest.pulls.get({
-      owner,
-      repo,
-      pull_number: prNumber,
+      owner, repo, pull_number: prNumber,
       mediaType: { format: 'diff' }
     });
 
-    // Get changed files
     const { data: files } = await octokit.rest.pulls.listFiles({
-      owner,
-      repo,
-      pull_number: prNumber
+      owner, repo, pull_number: prNumber
     });
 
-    // Filter ignored files
-    const filesToReview = files.filter(file => {
-      return !ignorePatterns.some(pattern => matchPattern(file.filename, pattern));
-    });
+    const filesToReview = files.filter(file =>
+      !ignorePatterns.some(pattern => matchPattern(file.filename, pattern))
+    );
 
     if (filesToReview.length === 0) {
       core.info('No files to review after filtering');
       return;
     }
 
-    core.info(`Reviewing ${filesToReview.length} files using ${aiProvider}`);
+    core.info(`Reviewing ${filesToReview.length} files`);
 
-    // Get review from AI
-    const review = await getAIReview(aiProvider, model, diff, filesToReview, prAuthor, persona, domainKnowledge, maxTokens, codeQuality, personality, reviewStrictness);
+    const MAX_DIFF_CHARS = 50000;
+    const truncated = diff.length > MAX_DIFF_CHARS;
+    const diffContent = truncated ? diff.slice(0, MAX_DIFF_CHARS) + '\n\n... [diff truncated]' : diff;
 
-    core.info(`Review verdict: ${review.verdict}`);
-    core.info(`Found ${review.line_comments?.length || 0} issues`);
+    const review = await getAIReview({
+      provider: aiProvider, model, diff: diffContent, files: filesToReview,
+      prAuthor, persona, domainKnowledge, maxTokens, codeQuality,
+      personality, strictness: reviewStrictness, mode
+    });
 
-    // Parse diff for line positions
+    core.info(`Verdict: ${review.verdict} · ${review.line_comments?.length || 0} issues`);
+
     const linePositionMap = parseDiffForLinePositions(diff);
-
-    // Build review comments
     const reviewComments = [];
     const severityLevel = { suggestion: 1, warning: 2, error: 3 };
     const minLevel = severityLevel[minSeverity] || 1;
 
     for (const comment of (review.line_comments || [])) {
       if (severityLevel[comment.severity] < minLevel) continue;
-
       const filePositions = linePositionMap[comment.file] || {};
       const position = filePositions[String(comment.line)];
-
       if (position) {
         const emoji = { error: '🔴', warning: '🟡', suggestion: '🔵' }[comment.severity] || '🔵';
         reviewComments.push({
           path: comment.file,
-          position: position,
+          position,
           body: `${emoji} **${comment.severity.toUpperCase()}**: ${comment.comment}`
         });
       }
     }
 
-    // Build review body (preserving previously checked scenarios)
-    const body = buildReviewBody(review, prAuthor, previousCheckedScenarios, reviewStyle, useEmoji);
+    const body = buildReviewBody(review, prAuthor, previousCheckedScenarios, reviewStyle, useEmoji, truncated);
 
-    // Determine review event
     let event = 'COMMENT';
-    if (review.verdict === 'approved' && autoApprove) {
-      // Note: Approving PRs requires either a PAT or enabling "Allow GitHub Actions to approve pull requests"
-      // in repository settings under Actions > General > Workflow permissions
-      event = 'APPROVE';
-    } else if (review.verdict === 'do_not_merge') {
-      event = 'REQUEST_CHANGES';
-    }
+    if (review.verdict === 'approved' && autoApprove) event = 'APPROVE';
+    else if (review.verdict === 'do_not_merge') event = 'REQUEST_CHANGES';
 
-    // Submit review
     await octokit.rest.pulls.createReview({
-      owner,
-      repo,
-      pull_number: prNumber,
-      commit_id: commitSha,
-      body,
-      event,
-      comments: reviewComments
+      owner, repo, pull_number: prNumber,
+      commit_id: commitSha, body, event, comments: reviewComments
     });
 
-    core.info('Review posted successfully');
+    core.info('Review posted');
 
-    // Set outputs
     core.setOutput('verdict', review.verdict);
     core.setOutput('summary', review.summary);
     core.setOutput('issues-count', review.line_comments?.length || 0);
 
-    // Fail if verdict is do_not_merge
     if (review.verdict === 'do_not_merge') {
       core.setFailed('Review verdict: Do Not Merge');
     }
-
   } catch (error) {
     core.setFailed(`Action failed: ${error.message}`);
   }
 }
 
-async function findAndDismissPreviousReview(octokit, owner, repo, prNumber) {
-  const checkedScenarios = new Set();
-
-  try {
-    // Get all reviews on the PR
-    const { data: reviews } = await octokit.rest.pulls.listReviews({
-      owner,
-      repo,
-      pull_number: prNumber
-    });
-
-    // Find SherlockQA reviews (identified by the header)
-    const sherlockReviews = reviews.filter(review =>
-      review.body && review.body.includes("## 🔍 SherlockQA's Review")
-    );
-
-    for (const review of sherlockReviews) {
-      // Parse checked scenarios from the review body
-      const checkedMatches = review.body.matchAll(/- \[x\] (.+)/gi);
-      for (const match of checkedMatches) {
-        checkedScenarios.add(match[1].trim());
-      }
-
-      // Dismiss the previous review to collapse it
+function loadRepoConfig() {
+  const workspace = process.env.GITHUB_WORKSPACE || process.cwd();
+  const candidates = ['.sherlockqa.yml', '.sherlockqa.yaml', '.sherlock.yml'];
+  for (const name of candidates) {
+    const p = path.join(workspace, name);
+    if (fs.existsSync(p)) {
       try {
-        await octokit.rest.pulls.dismissReview({
-          owner,
-          repo,
-          pull_number: prNumber,
-          review_id: review.id,
-          message: '🔄 Updated review available below (PR was updated)'
-        });
-        core.info(`Dismissed previous SherlockQA review #${review.id}`);
-      } catch (dismissError) {
-        // Dismissal may fail if review is not in a dismissable state (e.g., COMMENTED)
-        // In that case, we just continue - the old review will remain but new one will be added
-        core.info(`Could not dismiss review #${review.id}: ${dismissError.message}`);
+        const parsed = yaml.load(fs.readFileSync(p, 'utf8'));
+        if (parsed && typeof parsed === 'object') {
+          core.info(`Loaded config from ${name}`);
+          return parsed;
+        }
+      } catch (e) {
+        core.warning(`Failed to parse ${name}: ${e.message}`);
       }
     }
-  } catch (error) {
-    core.warning(`Failed to check for previous reviews: ${error.message}`);
   }
+  return {};
+}
 
+function defaultModelFor(provider) {
+  switch (provider) {
+    case 'anthropic': return 'claude-sonnet-4-5';
+    case 'gemini': return 'gemini-2.0-flash';
+    case 'ollama': return 'llama3.1';
+    case 'azure':
+    case 'azure-responses': return 'gpt-4o-mini';
+    default: return 'gpt-4o-mini';
+  }
+}
+
+async function findAndDismissPreviousReview(octokit, owner, repo, prNumber) {
+  const checkedScenarios = new Set();
+  try {
+    const { data: reviews } = await octokit.rest.pulls.listReviews({
+      owner, repo, pull_number: prNumber
+    });
+    const sherlockReviews = reviews.filter(r =>
+      r.body && r.body.includes("## 🔍 SherlockQA's Review")
+    );
+    for (const review of sherlockReviews) {
+      const checkedMatches = review.body.matchAll(/- \[x\] (.+)/gi);
+      for (const match of checkedMatches) checkedScenarios.add(match[1].trim());
+      try {
+        await octokit.rest.pulls.dismissReview({
+          owner, repo, pull_number: prNumber, review_id: review.id,
+          message: '🔄 Updated review available below (PR was updated)'
+        });
+        core.info(`Dismissed previous review #${review.id}`);
+      } catch (e) {
+        core.info(`Could not dismiss review #${review.id}: ${e.message}`);
+      }
+    }
+  } catch (e) {
+    core.warning(`Failed to check previous reviews: ${e.message}`);
+  }
   return checkedScenarios;
 }
 
-async function getAIReview(provider, model, diff, files, prAuthor, persona, domainKnowledge, maxTokens, codeQuality, personality, strictness) {
+async function getAIReview(opts) {
+  const { provider, model, diff, files, prAuthor, persona, domainKnowledge,
+    maxTokens, codeQuality, personality, strictness, mode } = opts;
+
   const changedFiles = files.map(f => f.filename).join('\n');
+  const systemPrompt = buildSystemPrompt(persona, domainKnowledge, codeQuality, personality, strictness, mode);
+  const userPrompt = buildUserPrompt(changedFiles, diff, prAuthor);
 
-  // Truncate diff if too large
-  let diffContent = diff;
-  if (diff.length > 50000) {
-    diffContent = diff.slice(0, 50000) + '\n\n... [diff truncated]';
-  }
-
-  const systemPrompt = buildSystemPrompt(persona, domainKnowledge, codeQuality, personality, strictness);
-  const userPrompt = buildUserPrompt(changedFiles, diffContent, prAuthor);
-
-  let response;
-
-  if (provider === 'azure-responses') {
-    response = await callAzureResponsesAPI(systemPrompt, userPrompt, model, maxTokens);
-  } else if (provider === 'azure') {
-    response = await callAzureOpenAI(systemPrompt, userPrompt, model, maxTokens);
-  } else {
-    response = await callOpenAI(systemPrompt, userPrompt, model, maxTokens);
-  }
-
+  const callers = {
+    'azure-responses': () => callAzureResponsesAPI(systemPrompt, userPrompt, model, maxTokens),
+    'azure': () => callAzureOpenAI(systemPrompt, userPrompt, model, maxTokens),
+    'anthropic': () => callAnthropic(systemPrompt, userPrompt, model, maxTokens),
+    'gemini': () => callGemini(systemPrompt, userPrompt, model, maxTokens),
+    'ollama': () => callOllama(systemPrompt, userPrompt, model, maxTokens),
+    'openai': () => callOpenAI(systemPrompt, userPrompt, model, maxTokens),
+  };
+  const caller = callers[provider] || callers.openai;
+  const response = await withRetry(caller, `provider=${provider}`);
   return parseReviewResponse(response);
+}
+
+async function withRetry(fn, label, attempts = 3) {
+  let lastErr;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      return await fn();
+    } catch (e) {
+      lastErr = e;
+      const status = e.status || e.statusCode;
+      const retriable = !status || status === 429 || status >= 500;
+      if (!retriable || i === attempts - 1) throw e;
+      const delay = Math.min(2000 * Math.pow(2, i), 15000) + Math.floor(Math.random() * 500);
+      core.warning(`${label} attempt ${i + 1} failed (${e.message}); retrying in ${delay}ms`);
+      await new Promise(r => setTimeout(r, delay));
+    }
+  }
+  throw lastErr;
 }
 
 async function callOpenAI(systemPrompt, userPrompt, model, maxTokens) {
   const apiKey = core.getInput('openai-api-key', { required: true });
   const client = new OpenAI({ apiKey });
-
   const response = await client.chat.completions.create({
     model,
     messages: [
@@ -218,9 +235,9 @@ async function callOpenAI(systemPrompt, userPrompt, model, maxTokens) {
       { role: 'user', content: userPrompt }
     ],
     max_tokens: maxTokens,
-    temperature: 0.3
+    temperature: 0.3,
+    response_format: { type: 'json_object' }
   });
-
   return response.choices[0].message.content;
 }
 
@@ -229,14 +246,12 @@ async function callAzureOpenAI(systemPrompt, userPrompt, model, maxTokens) {
   const endpoint = core.getInput('azure-endpoint', { required: true });
   const deployment = core.getInput('azure-deployment') || model;
   const apiVersion = core.getInput('azure-api-version') || '2024-02-15-preview';
-
   const client = new OpenAI({
     apiKey,
     baseURL: `${endpoint}/openai/deployments/${deployment}`,
     defaultQuery: { 'api-version': apiVersion },
     defaultHeaders: { 'api-key': apiKey }
   });
-
   const response = await client.chat.completions.create({
     model: deployment,
     messages: [
@@ -244,9 +259,9 @@ async function callAzureOpenAI(systemPrompt, userPrompt, model, maxTokens) {
       { role: 'user', content: userPrompt }
     ],
     max_tokens: maxTokens,
-    temperature: 0.3
+    temperature: 0.3,
+    response_format: { type: 'json_object' }
   });
-
   return response.choices[0].message.content;
 }
 
@@ -254,64 +269,151 @@ async function callAzureResponsesAPI(systemPrompt, userPrompt, model, maxTokens)
   const apiKey = core.getInput('azure-api-key', { required: true });
   const endpoint = core.getInput('azure-endpoint', { required: true });
   const apiVersion = core.getInput('azure-api-version') || '2025-04-01-preview';
-
-  // Combine prompts for Responses API format
   const fullPrompt = `${systemPrompt}\n\n---\n\n${userPrompt}`;
-
   const url = `${endpoint}/openai/responses?api-version=${apiVersion}`;
-
   const response = await fetch(url, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       'Authorization': `Bearer ${apiKey}`
     },
-    body: JSON.stringify({
-      input: fullPrompt,
-      max_output_tokens: maxTokens,
-      model: model
-    })
+    body: JSON.stringify({ input: fullPrompt, max_output_tokens: maxTokens, model })
   });
-
   if (!response.ok) {
-    const errorText = await response.text();
-    throw new Error(`Azure Responses API error: ${response.status} - ${errorText}`);
+    const err = new Error(`Azure Responses API: ${response.status} - ${await response.text()}`);
+    err.status = response.status;
+    throw err;
   }
-
   const result = await response.json();
-
-  // Extract content from Responses API format
-  let reviewContent = '';
-  if (result.output && Array.isArray(result.output)) {
+  let content = '';
+  if (Array.isArray(result.output)) {
     for (const item of result.output) {
       if (item.type === 'message' && item.content) {
-        for (const contentItem of item.content) {
-          if (contentItem.type === 'output_text') {
-            reviewContent += contentItem.text || '';
-          }
+        for (const c of item.content) {
+          if (c.type === 'output_text') content += c.text || '';
         }
       }
     }
   }
-
-  if (!reviewContent) {
-    throw new Error(`Unable to parse Azure Responses API response: ${JSON.stringify(result).slice(0, 500)}`);
-  }
-
-  return reviewContent;
+  if (!content) throw new Error(`Unparseable Azure Responses output: ${JSON.stringify(result).slice(0, 500)}`);
+  return content;
 }
 
-function buildSystemPrompt(persona, domainKnowledge, codeQuality, personality = 'detective', strictness = 'balanced') {
-  let prompt = '';
-
-  // Add persona if provided (overrides personality)
-  if (persona) {
-    prompt += `${persona}\n\n`;
+async function callAnthropic(systemPrompt, userPrompt, model, maxTokens) {
+  const apiKey = core.getInput('anthropic-api-key', { required: true });
+  const url = 'https://api.anthropic.com/v1/messages';
+  // Nudge JSON output by appending a leading "{" assistant turn (Anthropic trick).
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-api-key': apiKey,
+      'anthropic-version': '2023-06-01'
+    },
+    body: JSON.stringify({
+      model,
+      max_tokens: maxTokens,
+      temperature: 0.3,
+      system: systemPrompt,
+      messages: [
+        { role: 'user', content: userPrompt },
+        { role: 'assistant', content: '{' }
+      ]
+    })
+  });
+  if (!response.ok) {
+    const err = new Error(`Anthropic API: ${response.status} - ${await response.text()}`);
+    err.status = response.status;
+    throw err;
   }
+  const result = await response.json();
+  const text = (result.content || []).filter(c => c.type === 'text').map(c => c.text).join('');
+  // We pre-filled "{", so prepend it back when parsing.
+  return '{' + text;
+}
 
-  // Personality-specific introduction
-  const personalities = {
-    detective: `You are SherlockQA - a code detective with the deductive mind of Sherlock Holmes, but friendlier!
+async function callGemini(systemPrompt, userPrompt, model, maxTokens) {
+  const apiKey = core.getInput('gemini-api-key', { required: true });
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      systemInstruction: { parts: [{ text: systemPrompt }] },
+      contents: [{ role: 'user', parts: [{ text: userPrompt }] }],
+      generationConfig: {
+        temperature: 0.3,
+        maxOutputTokens: maxTokens,
+        responseMimeType: 'application/json'
+      }
+    })
+  });
+  if (!response.ok) {
+    const err = new Error(`Gemini API: ${response.status} - ${await response.text()}`);
+    err.status = response.status;
+    throw err;
+  }
+  const result = await response.json();
+  const text = result.candidates?.[0]?.content?.parts?.map(p => p.text).join('') || '';
+  if (!text) throw new Error(`Empty Gemini response: ${JSON.stringify(result).slice(0, 500)}`);
+  return text;
+}
+
+async function callOllama(systemPrompt, userPrompt, model, maxTokens) {
+  const baseUrl = core.getInput('ollama-base-url') || 'http://localhost:11434';
+  const url = `${baseUrl.replace(/\/$/, '')}/api/chat`;
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      model,
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: userPrompt }
+      ],
+      stream: false,
+      format: 'json',
+      options: { temperature: 0.3, num_predict: maxTokens }
+    })
+  });
+  if (!response.ok) {
+    const err = new Error(`Ollama API: ${response.status} - ${await response.text()}`);
+    err.status = response.status;
+    throw err;
+  }
+  const result = await response.json();
+  return result.message?.content || '';
+}
+
+function buildSystemPrompt(persona, domainKnowledge, codeQuality, personality = 'detective', strictness = 'balanced', mode = 'general') {
+  let prompt = '';
+  if (persona) prompt += `${persona}\n\n`;
+
+  if (mode === 'security') {
+    prompt += `You are SherlockQA in **Security Audit Mode** — a senior application-security engineer reviewing this PR for vulnerabilities.
+
+## Your Focus:
+- Injection (SQL, NoSQL, command, LDAP, XPath, template, prompt)
+- Authentication & session handling flaws
+- Authorization / IDOR / privilege escalation
+- Secrets and credentials in code, logs, errors
+- Cryptography misuse (weak algos, hardcoded keys, missing IVs, ECB)
+- Insecure deserialization
+- SSRF, XXE, path traversal, open redirect
+- XSS (reflected, stored, DOM), CSRF
+- Insecure dependencies / supply chain
+- Insecure direct object references and missing access checks
+- Sensitive data exposure (PII, tokens, logs)
+- Race conditions / TOCTOU
+- Insecure defaults, missing rate limits, DoS vectors
+
+## Tone:
+- Direct and technical. Cite the CWE or OWASP category when relevant.
+- Flag only real, exploitable issues — don't theorize about defense-in-depth missing.
+- For each finding, name the attack vector and the impact.`;
+  } else {
+    const personalities = {
+      detective: `You are SherlockQA - a code detective with the deductive mind of Sherlock Holmes, but friendlier!
 
 ## Your Personality:
 - Channel Sherlock Holmes: observant, witty, sharp - but supportive, not condescending
@@ -319,7 +421,7 @@ function buildSystemPrompt(persona, domainKnowledge, codeQuality, personality = 
 - Drop the occasional pun or clever observation
 - If code is clean: "No crimes detected here, Watson would be proud"`,
 
-    bro: `You are SherlockQA - a college friend who happens to be good at code reviews.
+      bro: `You are SherlockQA - a college friend who happens to be good at code reviews.
 
 ## Your Personality:
 - Talk like a friend reviewing your code: casual, direct, and helpful
@@ -329,7 +431,7 @@ function buildSystemPrompt(persona, domainKnowledge, codeQuality, personality = 
 - If code is good: "looks solid, ship it 🚀", "nice one!", "good stuff"
 - If issues: "hey, might want to check this", "this could be a problem", "bro fix this before merging"`,
 
-    desi: `You are SherlockQA - that desi dev buddy who mixes Hindi with English (Hinglish style).
+      desi: `You are SherlockQA - that desi dev buddy who mixes Hindi with English (Hinglish style).
 
 ## Your Personality:
 - Talk in Hinglish - mix Hindi words naturally: "yaar", "bhai", "accha", "sahi hai", "kya hai yeh"
@@ -338,7 +440,7 @@ function buildSystemPrompt(persona, domainKnowledge, codeQuality, personality = 
 - If code is good: "bas, perfect hai! 🚀", "ekdum mast, chal ship karte hai", "sahi hai bhai!"
 - If issues: "arre yaar yeh kya ho gaya", "bhai isko dekh le ek baar", "thoda issue hai yaar"`,
 
-    professional: `You are SherlockQA - a senior engineer who reviews code the way busy developers want: fast, sharp, no fluff.
+      professional: `You are SherlockQA - a senior engineer who reviews code the way busy developers want: fast, sharp, no fluff.
 
 ## Your Personality:
 - Lead with the verdict, explain only what matters
@@ -347,7 +449,7 @@ function buildSystemPrompt(persona, domainKnowledge, codeQuality, personality = 
 - When flagging issues, state the problem and the consequence: "X will cause Y"
 - Never repeat the same point in summary, verdict_reason, or comments — each field adds new information or says nothing`,
 
-    enthusiastic: `You are SherlockQA - that super positive teammate who gets genuinely excited about good code!
+      enthusiastic: `You are SherlockQA - that super positive teammate who gets genuinely excited about good code!
 
 ## Your Personality:
 - Be enthusiastic and encouraging: "Love this!", "This is awesome!", "Great thinking!"
@@ -355,24 +457,18 @@ function buildSystemPrompt(persona, domainKnowledge, codeQuality, personality = 
 - Stay positive even with feedback: "Super close! Just one tiny thing..."
 - If code is good: "This is *chef's kiss* 👨‍🍳", "Absolutely love it, ship it!"
 - Use emojis naturally: 🔥 ✨ 🎉 💪`
-  };
-
-  prompt += personalities[personality] || personalities.detective;
-
-  prompt += `
+    };
+    prompt += personalities[personality] || personalities.detective;
+    prompt += `
 - Keep reviews concise - developers be busy folks
 - Don't nitpick style - focus on real problems
 - IMPORTANT: Use your personality voice for ALL fields - summary, verdict_reason, comments. Stay in character!`;
-
-  // Add domain knowledge if provided
-  if (domainKnowledge) {
-    prompt += `
-
-## Domain Context:
-${domainKnowledge}`;
   }
 
-  // Strictness-based review focus
+  if (domainKnowledge) {
+    prompt += `\n\n## Domain Context:\n${domainKnowledge}`;
+  }
+
   const strictnessGuidelines = {
     lenient: `
 
@@ -382,7 +478,6 @@ ${domainKnowledge}`;
 - **Breaking Changes** - Only changes that would break existing integrations
 
 Be very lenient - approve unless there's a critical issue. Minor issues, code style, missing tests = don't flag.`,
-
     balanced: `
 
 ## What to Look For (flag real problems):
@@ -393,7 +488,6 @@ Be very lenient - approve unless there's a critical issue. Minor issues, code st
 - **Logic Errors** - Incorrect conditions, wrong comparisons, missed cases
 
 Be reasonable - flag issues that matter, but don't nitpick style or minor things.`,
-
     strict: `
 
 ## What to Look For (thorough review):
@@ -408,7 +502,6 @@ Be reasonable - flag issues that matter, but don't nitpick style or minor things
 
 Be thorough - flag anything that could cause problems. Better to catch issues now than in production.`
   };
-
   prompt += strictnessGuidelines[strictness] || strictnessGuidelines.balanced;
 
   prompt += `
@@ -424,13 +517,9 @@ Respond with this JSON:
   "tests_required": false,
   "test_suggestion": "",
   "qa_scenarios": ["Short scenario to test"],`;
-
-  // Add code quality to output format if enabled
   if (codeQuality) {
-    prompt += `
-  "code_quality": "Only if there's a real issue (duplication, complexity, maintainability concern). Set to null if code is fine.",`;
+    prompt += `\n  "code_quality": "Only if there's a real issue (duplication, complexity, maintainability concern). Set to null if code is fine.",`;
   }
-
   prompt += `
   "questions": [],
   "verdict": "approved|needs_changes|do_not_merge",
@@ -464,7 +553,6 @@ Respond with this JSON:
   if (codeQuality) {
     prompt += '\n- **code_quality**: Only include if there is an actionable problem (duplication, high complexity, maintainability risk). Set to null if code quality is fine — do NOT fill this with generic praise.';
   }
-
   return prompt;
 }
 
@@ -486,17 +574,17 @@ Respond with ONLY the JSON object as specified. No additional text.`;
 
 function parseReviewResponse(content) {
   let jsonContent = content.trim();
-
-  // Handle markdown code blocks
   const jsonMatch = content.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
-  if (jsonMatch) {
-    jsonContent = jsonMatch[1];
-  }
-
+  if (jsonMatch) jsonContent = jsonMatch[1];
   try {
     return JSON.parse(jsonContent);
-  } catch (error) {
-    core.warning(`Failed to parse AI response: ${error.message}`);
+  } catch (e) {
+    // Best-effort: extract first {...} block
+    const braceMatch = content.match(/\{[\s\S]*\}/);
+    if (braceMatch) {
+      try { return JSON.parse(braceMatch[0]); } catch (_) { /* fall through */ }
+    }
+    core.warning(`Failed to parse AI response: ${e.message}`);
     core.warning(`Raw response: ${content.slice(0, 500)}`);
     return {
       summary: 'Unable to parse AI response',
@@ -515,7 +603,6 @@ function parseDiffForLinePositions(diffText) {
   let currentFile = null;
   let diffPosition = 0;
   let currentNewLine = 0;
-
   for (const line of diffText.split('\n')) {
     if (line.startsWith('+++ b/')) {
       currentFile = line.slice(6);
@@ -523,16 +610,13 @@ function parseDiffForLinePositions(diffText) {
       diffPosition = 0;
       continue;
     }
-
     if (!currentFile) continue;
-
     const hunkMatch = line.match(/^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
     if (hunkMatch) {
       currentNewLine = parseInt(hunkMatch[1], 10);
       diffPosition++;
       continue;
     }
-
     if (line.startsWith('+') && !line.startsWith('+++')) {
       fileLineMap[currentFile][currentNewLine] = diffPosition;
       currentNewLine++;
@@ -545,11 +629,10 @@ function parseDiffForLinePositions(diffText) {
       diffPosition++;
     }
   }
-
   return fileLineMap;
 }
 
-function buildReviewBody(review, prAuthor, previousCheckedScenarios = new Set(), reviewStyle = 'compact', useEmoji = true) {
+function buildReviewBody(review, prAuthor, previousCheckedScenarios = new Set(), reviewStyle = 'compact', useEmoji = true, truncated = false) {
   const e = useEmoji ? {
     detective: '🔍', summary: '📝', tests: '🧪', qa: '🎯', questions: '❓',
     quality: '🧹', verdict: '🏁', approved: '✅', needs_changes: '⚠️',
@@ -563,7 +646,6 @@ function buildReviewBody(review, prAuthor, previousCheckedScenarios = new Set(),
   const verdictEmoji = { approved: e.approved, needs_changes: e.needs_changes, do_not_merge: e.do_not_merge };
   const verdictText = { approved: 'Approved', needs_changes: 'Needs Changes', do_not_merge: 'Do Not Merge' };
 
-  // Count stats for compact header
   const issueCount = review.line_comments?.length || 0;
   const qaCount = review.qa_scenarios?.length || 0;
   const questionCount = review.questions?.length || 0;
@@ -572,26 +654,21 @@ function buildReviewBody(review, prAuthor, previousCheckedScenarios = new Set(),
 
   if (reviewStyle === 'compact') {
     const isCleanApproval = review.verdict === 'approved' && issueCount === 0 && questionCount === 0;
-
-    // Compact: Verdict at top with stats
     parts.push(`## ${e.detective} SherlockQA's Review\n`);
     parts.push(`**Verdict:** ${verdictEmoji[review.verdict] || e.needs_changes} ${verdictText[review.verdict] || review.verdict} | ${issueCount} issues · ${qaCount} QA scenarios${questionCount > 0 ? ` · ${questionCount} questions` : ''}\n`);
 
     if (isCleanApproval) {
-      // Clean approval: verdict_reason as the one-liner, summary in blockquote for context
-      if (review.verdict_reason) {
-        parts.push(`> ${review.verdict_reason}\n`);
-      }
+      if (review.verdict_reason) parts.push(`> ${review.verdict_reason}\n`);
       parts.push(`${review.summary || ''}\n`);
     } else {
-      // Has issues: show full detail
-      if (review.verdict_reason) {
-        parts.push(`> ${review.verdict_reason}\n`);
-      }
+      if (review.verdict_reason) parts.push(`> ${review.verdict_reason}\n`);
       parts.push(`**Summary:** ${review.summary || 'No summary'}\n`);
     }
 
-    // Code quality - only shown when there's an actual issue (null/empty = skip)
+    if (truncated) {
+      parts.push(`> ${e.warning} **Heads up:** PR diff was large and got truncated — this review may have missed parts of the change. Consider splitting large PRs.\n`);
+    }
+
     if (review.code_quality && review.code_quality !== 'null') {
       const qualityText = typeof review.code_quality === 'string'
         ? review.code_quality
@@ -601,7 +678,6 @@ function buildReviewBody(review, prAuthor, previousCheckedScenarios = new Set(),
       }
     }
 
-    // Tests in collapsible if required
     if (review.tests_required && review.test_suggestion) {
       parts.push(`<details>`);
       parts.push(`<summary>${e.tests} <b>Tests Suggested</b></summary>\n`);
@@ -609,7 +685,6 @@ function buildReviewBody(review, prAuthor, previousCheckedScenarios = new Set(),
       parts.push(`</details>\n`);
     }
 
-    // QA scenarios in collapsible - skip for clean approvals with no scenarios
     if (review.qa_scenarios?.length > 0) {
       parts.push(`<details>`);
       parts.push(`<summary>${e.qa} <b>QA Scenarios (${qaCount})</b></summary>\n`);
@@ -621,15 +696,16 @@ function buildReviewBody(review, prAuthor, previousCheckedScenarios = new Set(),
       parts.push(`\n</details>\n`);
     }
 
-    // Questions inline if any
     if (review.questions?.length > 0) {
       parts.push(`**${e.questions} Questions:** ${review.questions.join(' | ')}\n`);
     }
-
   } else {
-    // Detailed: Original format
     parts.push(`## ${e.detective} SherlockQA's Review\n`);
     parts.push(`### ${e.summary} Summary\n${review.summary || 'No summary'}\n`);
+
+    if (truncated) {
+      parts.push(`> ${e.warning} **Heads up:** PR diff was large and got truncated — this review may have missed parts of the change.\n`);
+    }
 
     if (review.tests_required && review.test_suggestion) {
       parts.push(`### ${e.tests} Tests Required`);
@@ -668,44 +744,63 @@ function buildReviewBody(review, prAuthor, previousCheckedScenarios = new Set(),
     }
 
     parts.push(`### ${e.verdict} Verdict\n${verdictEmoji[review.verdict] || e.needs_changes} ${verdictText[review.verdict] || review.verdict}`);
-    if (review.verdict_reason) {
-      parts.push(`\n> ${review.verdict_reason}`);
-    }
+    if (review.verdict_reason) parts.push(`\n> ${review.verdict_reason}`);
   }
 
   return parts.join('\n');
 }
 
+// Glob matcher supporting *, **, ?, and exact substring fallback for legacy patterns.
 function matchPattern(filename, pattern) {
-  if (pattern.startsWith('*.')) {
-    return filename.endsWith(pattern.slice(1));
+  if (!pattern) return false;
+  // Exact match
+  if (filename === pattern) return true;
+  // Convert glob to regex
+  if (pattern.includes('*') || pattern.includes('?')) {
+    const regex = globToRegex(pattern);
+    if (regex.test(filename)) return true;
+    // Common case: "*.md" should also match "docs/foo.md"
+    if (pattern.startsWith('*.') && filename.endsWith(pattern.slice(1))) return true;
+    return false;
   }
-  return filename === pattern || filename.includes(pattern);
+  // Substring fallback (legacy behavior so existing configs keep working)
+  return filename.includes(pattern);
+}
+
+function globToRegex(glob) {
+  let re = '';
+  for (let i = 0; i < glob.length; i++) {
+    const c = glob[i];
+    if (c === '*') {
+      if (glob[i + 1] === '*') {
+        re += '.*'; i++;
+        if (glob[i + 1] === '/') i++;
+      } else {
+        re += '[^/]*';
+      }
+    } else if (c === '?') {
+      re += '[^/]';
+    } else if ('.+^${}()|[]\\'.includes(c)) {
+      re += '\\' + c;
+    } else {
+      re += c;
+    }
+  }
+  return new RegExp('^' + re + '$');
 }
 
 function isScenarioPreviouslyChecked(scenario, previousCheckedScenarios) {
-  // Normalize the scenario text for comparison
   const normalize = (text) => text.toLowerCase().replace(/[^\w\s]/g, '').trim();
   const normalizedScenario = normalize(scenario);
-
   for (const checked of previousCheckedScenarios) {
     const normalizedChecked = normalize(checked);
-    // Exact match
-    if (normalizedScenario === normalizedChecked) {
-      return true;
-    }
-    // Fuzzy match - if one contains most of the other (for slight wording changes)
-    if (normalizedScenario.includes(normalizedChecked) || normalizedChecked.includes(normalizedScenario)) {
-      return true;
-    }
-    // Check word overlap (if >70% of words match)
+    if (normalizedScenario === normalizedChecked) return true;
+    if (normalizedScenario.includes(normalizedChecked) || normalizedChecked.includes(normalizedScenario)) return true;
     const scenarioWords = new Set(normalizedScenario.split(/\s+/));
     const checkedWords = new Set(normalizedChecked.split(/\s+/));
     const intersection = [...scenarioWords].filter(w => checkedWords.has(w));
     const minSize = Math.min(scenarioWords.size, checkedWords.size);
-    if (minSize > 0 && intersection.length / minSize >= 0.7) {
-      return true;
-    }
+    if (minSize > 0 && intersection.length / minSize >= 0.7) return true;
   }
   return false;
 }
