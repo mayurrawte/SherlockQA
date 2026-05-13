@@ -85,6 +85,8 @@ jobs:
 | `use-emoji` | Use emojis in review output | No | `true` |
 | `personality` | `detective`, `bro`, `desi`, `professional`, `enthusiastic` | No | `detective` |
 | `review-strictness` | `lenient`, `balanced`, `strict` | No | `balanced` |
+| `update-summary-comment` | Maintain a single sticky issue-comment with the current summary | No | `true` |
+| `create-check-run` | Create a Check Run so verdict appears in the PR Checks column (needs `checks: write`) | No | `true` |
 
 *One of `openai-api-key`, `anthropic-api-key`, `gemini-api-key`, or `azure-api-key` is required, matching the provider.
 
@@ -105,6 +107,9 @@ jobs:
 | `verdict` | Review verdict (`approved`, `needs_changes`, `do_not_merge`) |
 | `summary` | Review summary |
 | `issues-count` | Number of issues found |
+| `tokens-in` | Input tokens consumed |
+| `tokens-out` | Output tokens generated |
+| `cost-usd` | Estimated review cost in USD (set when model is in the pricing table) |
 
 ## Usage Examples
 
@@ -242,9 +247,10 @@ domain-knowledge: |
 permissions:
   contents: read
   pull-requests: write
+  checks: write   # optional, enables Check Run output
 ```
 
-This allows SherlockQA to read the PR diff and post review comments.
+This allows SherlockQA to read the PR diff and post review comments. The optional `checks: write` permission lets SherlockQA create a Check Run so the verdict surfaces in the PR's *Checks* column. Without it, the action prints a warning and continues — review and inline comments are unaffected.
 
 ### Enabling Auto-Approve
 

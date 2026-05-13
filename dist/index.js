@@ -51831,6 +51831,8 @@ async function run() {
     const personality = getInput('personality') || 'detective';
     const reviewStrictness = getInput('review-strictness') || 'balanced';
     const mode = getInput('mode') || 'general';
+    const updateSummaryComment = (getInput('update-summary-comment') || 'true') !== 'false';
+    const createCheckRun = (getInput('create-check-run') || 'true') !== 'false';
 
     const context = github.context;
     if (context.eventName !== 'pull_request' && context.eventName !== 'pull_request_target') {
@@ -51872,13 +51874,15 @@ async function run() {
     const truncated = diff.length > MAX_DIFF_CHARS;
     const diffContent = truncated ? diff.slice(0, MAX_DIFF_CHARS) + '\n\n... [diff truncated]' : diff;
 
-    const review = await getAIReview({
+    const { review, usage } = await getAIReview({
       provider: aiProvider, model, diff: diffContent, files: filesToReview,
       prAuthor, persona, domainKnowledge, maxTokens, codeQuality,
       personality, strictness: reviewStrictness, mode
     });
 
-    core.info(`Verdict: ${review.verdict} · ${review.line_comments?.length || 0} issues`);
+    const cost = estimateCost(model, usage);
+    const costStr = cost != null ? ` · ~$${cost.toFixed(4)}` : '';
+    core.info(`Verdict: ${review.verdict} · ${review.line_comments?.length || 0} issues · ${usage.input}+${usage.output} tokens${costStr}`);
 
     const linePositionMap = parseDiffForLinePositions(diff);
     const reviewComments = [];
@@ -51899,7 +51903,8 @@ async function run() {
       }
     }
 
-    const body = buildReviewBody(review, prAuthor, previousCheckedScenarios, reviewStyle, useEmoji, truncated);
+    const severityCounts = countSeverity(review.line_comments || []);
+    const body = buildReviewBody(review, prAuthor, previousCheckedScenarios, reviewStyle, useEmoji, truncated, severityCounts);
 
     let event = 'COMMENT';
     if (review.verdict === 'approved' && autoApprove) event = 'APPROVE';
@@ -51909,12 +51914,25 @@ async function run() {
       owner, repo, pull_number: prNumber,
       commit_id: commitSha, body, event, comments: reviewComments
     });
-
     core.info('Review posted');
+
+    if (updateSummaryComment) {
+      await upsertStickyComment(octokit, owner, repo, prNumber, body);
+    }
+
+    if (createCheckRun) {
+      await createCheckRunSafely({
+        octokit, owner, repo, commitSha, review, severityCounts,
+        reviewComments, usage, cost, model, aiProvider, truncated
+      });
+    }
 
     core.setOutput('verdict', review.verdict);
     core.setOutput('summary', review.summary);
     core.setOutput('issues-count', review.line_comments?.length || 0);
+    core.setOutput('tokens-in', String(usage.input));
+    core.setOutput('tokens-out', String(usage.output));
+    if (cost != null) core.setOutput('cost-usd', cost.toFixed(6));
 
     if (review.verdict === 'do_not_merge') {
       core.setFailed('Review verdict: Do Not Merge');
@@ -52000,8 +52018,43 @@ async function getAIReview(opts) {
     'openai': () => callOpenAI(systemPrompt, userPrompt, model, maxTokens),
   };
   const caller = callers[provider] || callers.openai;
-  const response = await withRetry(caller, `provider=${provider}`);
-  return parseReviewResponse(response);
+  const result = await withRetry(caller, `provider=${provider}`);
+  return {
+    review: parseReviewResponse(result.content),
+    usage: result.usage || { input: 0, output: 0 }
+  };
+}
+
+// Approximate USD pricing per 1M tokens, May 2026. Update as needed.
+const PRICING = {
+  'gpt-4o-mini':         { in: 0.15,  out: 0.60 },
+  'gpt-4o':              { in: 2.50,  out: 10.00 },
+  'gpt-4-turbo':         { in: 10.00, out: 30.00 },
+  'gpt-4':               { in: 30.00, out: 60.00 },
+  'gpt-4.1':             { in: 2.00,  out: 8.00 },
+  'gpt-4.1-mini':        { in: 0.40,  out: 1.60 },
+  'gpt-4.1-nano':        { in: 0.10,  out: 0.40 },
+  'gpt-5':               { in: 5.00,  out: 15.00 },
+  'gpt-5-mini':          { in: 0.50,  out: 2.00 },
+  'claude-opus-4':       { in: 15.00, out: 75.00 },
+  'claude-sonnet-4':     { in: 3.00,  out: 15.00 },
+  'claude-sonnet-4-5':   { in: 3.00,  out: 15.00 },
+  'claude-haiku-4-5':    { in: 1.00,  out: 5.00 },
+  'gemini-2.0-flash':    { in: 0.075, out: 0.30 },
+  'gemini-2.5-flash':    { in: 0.075, out: 0.30 },
+  'gemini-2.5-pro':      { in: 1.25,  out: 5.00 },
+};
+
+function estimateCost(model, usage) {
+  if (!usage || (!usage.input && !usage.output)) return null;
+  // Match by prefix so versioned model IDs (claude-sonnet-4-5-20251001) still resolve.
+  let entry = PRICING[model];
+  if (!entry) {
+    const match = Object.keys(PRICING).find(k => model && model.startsWith(k));
+    if (match) entry = PRICING[match];
+  }
+  if (!entry) return null;
+  return (usage.input * entry.in + usage.output * entry.out) / 1_000_000;
 }
 
 async function withRetry(fn, label, attempts = 3) {
@@ -52035,7 +52088,13 @@ async function callOpenAI(systemPrompt, userPrompt, model, maxTokens) {
     temperature: 0.3,
     response_format: { type: 'json_object' }
   });
-  return response.choices[0].message.content;
+  return {
+    content: response.choices[0].message.content,
+    usage: {
+      input: response.usage?.prompt_tokens || 0,
+      output: response.usage?.completion_tokens || 0
+    }
+  };
 }
 
 async function callAzureOpenAI(systemPrompt, userPrompt, model, maxTokens) {
@@ -52059,7 +52118,13 @@ async function callAzureOpenAI(systemPrompt, userPrompt, model, maxTokens) {
     temperature: 0.3,
     response_format: { type: 'json_object' }
   });
-  return response.choices[0].message.content;
+  return {
+    content: response.choices[0].message.content,
+    usage: {
+      input: response.usage?.prompt_tokens || 0,
+      output: response.usage?.completion_tokens || 0
+    }
+  };
 }
 
 async function callAzureResponsesAPI(systemPrompt, userPrompt, model, maxTokens) {
@@ -52093,7 +52158,13 @@ async function callAzureResponsesAPI(systemPrompt, userPrompt, model, maxTokens)
     }
   }
   if (!content) throw new Error(`Unparseable Azure Responses output: ${JSON.stringify(result).slice(0, 500)}`);
-  return content;
+  return {
+    content,
+    usage: {
+      input: result.usage?.input_tokens || result.usage?.prompt_tokens || 0,
+      output: result.usage?.output_tokens || result.usage?.completion_tokens || 0
+    }
+  };
 }
 
 async function callAnthropic(systemPrompt, userPrompt, model, maxTokens) {
@@ -52126,7 +52197,13 @@ async function callAnthropic(systemPrompt, userPrompt, model, maxTokens) {
   const result = await response.json();
   const text = (result.content || []).filter(c => c.type === 'text').map(c => c.text).join('');
   // We pre-filled "{", so prepend it back when parsing.
-  return '{' + text;
+  return {
+    content: '{' + text,
+    usage: {
+      input: result.usage?.input_tokens || 0,
+      output: result.usage?.output_tokens || 0
+    }
+  };
 }
 
 async function callGemini(systemPrompt, userPrompt, model, maxTokens) {
@@ -52153,7 +52230,13 @@ async function callGemini(systemPrompt, userPrompt, model, maxTokens) {
   const result = await response.json();
   const text = result.candidates?.[0]?.content?.parts?.map(p => p.text).join('') || '';
   if (!text) throw new Error(`Empty Gemini response: ${JSON.stringify(result).slice(0, 500)}`);
-  return text;
+  return {
+    content: text,
+    usage: {
+      input: result.usageMetadata?.promptTokenCount || 0,
+      output: result.usageMetadata?.candidatesTokenCount || 0
+    }
+  };
 }
 
 async function callOllama(systemPrompt, userPrompt, model, maxTokens) {
@@ -52179,7 +52262,13 @@ async function callOllama(systemPrompt, userPrompt, model, maxTokens) {
     throw err;
   }
   const result = await response.json();
-  return result.message?.content || '';
+  return {
+    content: result.message?.content || '',
+    usage: {
+      input: result.prompt_eval_count || 0,
+      output: result.eval_count || 0
+    }
+  };
 }
 
 function buildSystemPrompt(persona, domainKnowledge, codeQuality, personality = 'detective', strictness = 'balanced', mode = 'general') {
@@ -52429,7 +52518,26 @@ function parseDiffForLinePositions(diffText) {
   return fileLineMap;
 }
 
-function buildReviewBody(review, prAuthor, previousCheckedScenarios = new Set(), reviewStyle = 'compact', useEmoji = true, truncated = false) {
+function countSeverity(comments) {
+  const counts = { error: 0, warning: 0, suggestion: 0 };
+  for (const c of comments) {
+    if (counts[c.severity] != null) counts[c.severity]++;
+  }
+  return counts;
+}
+
+function formatSeverityBreakdown(counts, useEmoji) {
+  const parts = [];
+  const errIcon = useEmoji ? '🔴' : 'E';
+  const warnIcon = useEmoji ? '🟡' : 'W';
+  const suggIcon = useEmoji ? '🔵' : 'S';
+  if (counts.error) parts.push(`${counts.error} ${errIcon}`);
+  if (counts.warning) parts.push(`${counts.warning} ${warnIcon}`);
+  if (counts.suggestion) parts.push(`${counts.suggestion} ${suggIcon}`);
+  return parts.join(' · ');
+}
+
+function buildReviewBody(review, prAuthor, previousCheckedScenarios = new Set(), reviewStyle = 'compact', useEmoji = true, truncated = false, severityCounts = null) {
   const e = useEmoji ? {
     detective: '🔍', summary: '📝', tests: '🧪', qa: '🎯', questions: '❓',
     quality: '🧹', verdict: '🏁', approved: '✅', needs_changes: '⚠️',
@@ -52446,13 +52554,16 @@ function buildReviewBody(review, prAuthor, previousCheckedScenarios = new Set(),
   const issueCount = review.line_comments?.length || 0;
   const qaCount = review.qa_scenarios?.length || 0;
   const questionCount = review.questions?.length || 0;
+  const severityStr = severityCounts && issueCount > 0
+    ? ` (${formatSeverityBreakdown(severityCounts, useEmoji)})`
+    : '';
 
   const parts = [];
 
   if (reviewStyle === 'compact') {
     const isCleanApproval = review.verdict === 'approved' && issueCount === 0 && questionCount === 0;
     parts.push(`## ${e.detective} SherlockQA's Review\n`);
-    parts.push(`**Verdict:** ${verdictEmoji[review.verdict] || e.needs_changes} ${verdictText[review.verdict] || review.verdict} | ${issueCount} issues · ${qaCount} QA scenarios${questionCount > 0 ? ` · ${questionCount} questions` : ''}\n`);
+    parts.push(`**Verdict:** ${verdictEmoji[review.verdict] || e.needs_changes} ${verdictText[review.verdict] || review.verdict} | ${issueCount} issues${severityStr} · ${qaCount} QA scenarios${questionCount > 0 ? ` · ${questionCount} questions` : ''}\n`);
 
     if (isCleanApproval) {
       if (review.verdict_reason) parts.push(`> ${review.verdict_reason}\n`);
@@ -52584,6 +52695,94 @@ function globToRegex(glob) {
     }
   }
   return new RegExp('^' + re + '$');
+}
+
+const STICKY_MARKER = '<!-- sherlockqa:sticky -->';
+
+async function upsertStickyComment(octokit, owner, repo, prNumber, body) {
+  const stickyBody = `${STICKY_MARKER}\n${body}`;
+  try {
+    const { data: comments } = await octokit.rest.issues.listComments({
+      owner, repo, issue_number: prNumber, per_page: 100
+    });
+    const existing = comments.find(c => c.body && c.body.includes(STICKY_MARKER));
+    if (existing) {
+      await octokit.rest.issues.updateComment({
+        owner, repo, comment_id: existing.id, body: stickyBody
+      });
+      core.info(`Updated sticky comment #${existing.id}`);
+    } else {
+      await octokit.rest.issues.createComment({
+        owner, repo, issue_number: prNumber, body: stickyBody
+      });
+      core.info('Created sticky comment');
+    }
+  } catch (e) {
+    core.warning(`Failed to upsert sticky comment: ${e.message}`);
+  }
+}
+
+async function createCheckRunSafely(opts) {
+  const { octokit, owner, repo, commitSha, review, severityCounts,
+    reviewComments, usage, cost, model, aiProvider, truncated } = opts;
+
+  const conclusion =
+    review.verdict === 'do_not_merge' ? 'failure' :
+    review.verdict === 'needs_changes' ? 'neutral' :
+    review.verdict === 'approved' ? 'success' : 'neutral';
+
+  const titleByVerdict = {
+    approved: 'Approved — no blocking issues',
+    needs_changes: 'Needs changes',
+    do_not_merge: 'Do not merge'
+  };
+
+  const issueCount = (review.line_comments || []).length;
+  const summaryLines = [
+    `**Verdict:** ${review.verdict}`,
+    `**Issues:** ${issueCount} (${severityCounts.error}🔴 · ${severityCounts.warning}🟡 · ${severityCounts.suggestion}🔵)`,
+    `**Model:** ${aiProvider} / ${model}`,
+    `**Tokens:** ${usage.input} in / ${usage.output} out${cost != null ? ` · ~$${cost.toFixed(4)}` : ''}`
+  ];
+  if (truncated) summaryLines.push('> ⚠️ PR diff truncated — review may be incomplete.');
+  if (review.summary) summaryLines.push('', review.summary);
+  if (review.verdict_reason) summaryLines.push('', `> ${review.verdict_reason}`);
+
+  // Map review comments back to annotations (file + line). The review API uses
+  // diff "position" for inline comments, but the Checks API needs file path + line.
+  const annotations = [];
+  for (const c of (review.line_comments || [])) {
+    if (!c.file || !c.line) continue;
+    const level = c.severity === 'error' ? 'failure'
+      : c.severity === 'warning' ? 'warning' : 'notice';
+    annotations.push({
+      path: c.file,
+      start_line: c.line,
+      end_line: c.line,
+      annotation_level: level,
+      message: c.comment || ''
+    });
+    if (annotations.length >= 50) break; // Checks API limit per request
+  }
+
+  try {
+    await octokit.rest.checks.create({
+      owner, repo,
+      name: 'SherlockQA',
+      head_sha: commitSha,
+      status: 'completed',
+      conclusion,
+      output: {
+        title: titleByVerdict[review.verdict] || 'Reviewed',
+        summary: summaryLines.join('\n'),
+        annotations
+      }
+    });
+    core.info(`Check Run created (conclusion=${conclusion})`);
+  } catch (e) {
+    // Most common cause: workflow lacks checks:write permission. Don't fail the action.
+    core.warning(`Check Run skipped: ${e.message}. Add "checks: write" to workflow permissions to enable.`);
+  }
 }
 
 function isScenarioPreviouslyChecked(scenario, previousCheckedScenarios) {
