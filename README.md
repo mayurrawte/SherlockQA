@@ -15,6 +15,11 @@
 
 SherlockQA is a GitHub Action that reviews your pull requests with AI — identifies bugs, security issues, and suggests QA test scenarios. Works with **OpenAI, Anthropic Claude, Google Gemini, Azure OpenAI, and local models via Ollama**. MIT-licensed, BYO API key — no data leaves your CI.
 
+<!-- Demo GIF — replace `assets/demo.gif` with a real recording -->
+<p align="center">
+  <img src="assets/demo.gif" alt="SherlockQA reviewing a pull request" width="720" onerror="this.style.display='none'">
+</p>
+
 ## Features
 
 - **Multi-Provider AI** — OpenAI, Anthropic Claude, Google Gemini, Azure OpenAI, Azure Responses API, and self-hosted Ollama
@@ -327,6 +332,14 @@ Python, JavaScript, TypeScript, Go, Java, C#, Ruby, PHP, Rust
 
 MIT License - see [LICENSE](LICENSE) for details.
 
+## Documentation
+
+- [ROADMAP](ROADMAP.md) — what's planned next
+- [CHANGELOG](CHANGELOG.md) — what's shipped in each release
+- [CONTRIBUTING](CONTRIBUTING.md) — how to hack on SherlockQA
+- [SECURITY](SECURITY.md) — vulnerability reporting + data handling
+
 ## Support
 
 - [GitHub Issues](https://github.com/mayurrawte/SherlockQA/issues)
+- [Sponsor on GitHub](https://github.com/sponsors/mayurrawte) — keeps SherlockQA free and MIT

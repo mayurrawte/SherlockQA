@@ -1,0 +1,38 @@
+# SherlockQA — AI-powered code review on every pull request.
+# Docs: https://github.com/mayurrawte/SherlockQA
+#
+# Before running this workflow:
+#   1. Add an API key to your repo secrets. One of:
+#        - OPENAI_API_KEY        (uses OpenAI, default)
+#        - ANTHROPIC_API_KEY     (set ai-provider: anthropic below)
+#        - GEMINI_API_KEY        (set ai-provider: gemini below)
+#        - AZURE_OPENAI_KEY      (set ai-provider: azure  + azure-endpoint)
+#   2. (Optional) Drop a .sherlockqa.yml in your repo root for shared defaults.
+
+name: SherlockQA
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+  checks: write   # optional — enables verdict in the PR Checks column
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      - name: AI code review
+        uses: mayurrawte/SherlockQA@v1
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          # ai-provider: openai         # openai | anthropic | gemini | azure | azure-responses | ollama
+          # model: gpt-4o-mini
+          # personality: detective      # detective | bro | desi | professional | enthusiastic
+          # review-strictness: balanced # lenient | balanced | strict
+          # mode: general               # general | security
+          # auto-approve: false
+          # code-quality: false

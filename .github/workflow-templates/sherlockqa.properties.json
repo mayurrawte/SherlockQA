@@ -1,0 +1,11 @@
+{
+  "name": "SherlockQA — AI code review",
+  "description": "AI-powered pull request review. Finds bugs, security issues, and suggests QA scenarios. Works with OpenAI, Claude, Gemini, Azure, or local Ollama.",
+  "iconName": "octicon-search",
+  "categories": [
+    "Code Quality",
+    "Code Review",
+    "AI Assisted"
+  ],
+  "filePatterns": []
+}
