@@ -6,6 +6,25 @@
 
 ---
 
+## Status
+
+**Latest release:** [`v1.2.0`](https://github.com/mayurrawte/SherlockQA/releases/tag/v1.2.0) — shipped 2026-05-14
+**Live `@v1` pointer:** `1a6e3e6` (v1.2.0)
+**Currently in progress:** none — pick the next batch from v1.2 (conversational) or v1.3 (quality).
+
+### Recently shipped
+- **v1.2.0** — sticky comment, GitHub Check Run, severity breakdown, token/cost tracking
+- **v1.1.0** — Anthropic Claude, Google Gemini, Ollama, security mode, `.sherlockqa.yml`, retries, glob, truncation warning
+- **Distribution polish** — `CHANGELOG`, `CONTRIBUTING`, `SECURITY`, `FUNDING.yml`, workflow template
+
+### Open WIP / next-up candidates
+- `@sherlock` mention-to-respond + `/sherlock` slash commands (the remaining v1.2 interactive items)
+- Demo GIF capture (`assets/demo.gif`)
+- GitHub Release notes for v1.2.0 (paste CHANGELOG section in GitHub UI)
+- Marketplace listing audit + first awesome-list PR submissions
+
+---
+
 ## Guiding principles
 
 1. **MIT + BYO-key stays free forever.** That's the wedge against CodeRabbit/Greptile.
@@ -43,16 +62,19 @@ Three pillars:
 
 ---
 
-## v1.2 — Conversational reviews *(next, ~1 week)*
+## v1.2 — Conversational reviews *(partial, in progress)*
 
 > Make the review *interactive*, not a one-shot drop-and-leave.
 
+**v1.2.0 — Polish ✅ shipped 2026-05-14**
+- [x] **Sticky summary comment** — edit one pinned issue-comment per PR
+- [x] **GitHub Check Run output** — verdict + annotations surface in the *Checks* column
+- [x] **Severity breakdown in verdict header** — `0 🔴 · 2 🟡 · 1 🔵`
+- [x] **Cost & token logging** — `tokens-in`, `tokens-out`, `cost-usd` outputs; pricing table for OpenAI, Anthropic, Gemini
+
+**v1.2.1 — Interactive *(WIP — next up)***
 - [ ] **`@sherlock` mention-to-respond** — listen on `issue_comment`, reply on the review thread
 - [ ] **`/sherlock` slash commands** — `review-again`, `explain <line>`, `ignore`, `approve`
-- [ ] **Sticky summary comment** — edit one pinned comment per PR instead of stacking reviews
-- [ ] **GitHub Check Run output** — surface verdict + severity counts in the *Checks* column
-- [ ] **Severity breakdown in verdict header** — `0 🔴 · 2 🟡 · 1 🔵`
-- [ ] **Cost & token logging** — log `tokens_in / tokens_out / est_cost` for every run
 
 **Success criteria:** users on existing v1.x workflows see no regressions; ≥3 testers confirm `@sherlock` follow-ups feel natural.
 
@@ -73,15 +95,20 @@ Three pillars:
 
 ---
 
-## v1.4 — Distribution & polish *(parallel to v1.3)*
+## v1.4 — Distribution & polish *(partial, in progress)*
 
 > Zero engineering on the core; pure leverage on installs.
 
-- [ ] **Demo GIF in README** (top of file)
-- [ ] **Workflow templates** in `.github/workflow-templates/`
-- [ ] **`CHANGELOG.md`** starting at v1.1.0
-- [ ] **`CONTRIBUTING.md`** + `SECURITY.md` (Marketplace SEO signal)
-- [ ] **`.github/FUNDING.yml`** with GitHub Sponsors
+**Shipped 2026-05-14**
+- [x] **Workflow template** in `.github/workflow-templates/` (auto-appears in any repo's *New workflow* picker)
+- [x] **`CHANGELOG.md`** (Keep-a-Changelog) starting at v1.0
+- [x] **`CONTRIBUTING.md`** + `SECURITY.md` (Marketplace SEO signal, private-vuln-report flow)
+- [x] **`.github/FUNDING.yml`** with GitHub Sponsors
+
+**Still to do**
+- [ ] **Demo GIF** — record 30–45s and commit to `assets/demo.gif` (slot already wired in README)
+- [ ] **Enable GitHub Sponsors** on the account (FUNDING.yml already points there)
+- [ ] **Create v1.2.0 GitHub Release** — paste CHANGELOG section into the GitHub UI
 - [ ] **Marketplace listing audit** — first 200 chars, keywords, screenshots
 - [ ] **Submit PRs to** `sdras/awesome-actions`, `awesome-ai-coding`, `awesome-ai-tools`
 - [ ] **Launch post**: "SherlockQA v1.2 — works with Claude, Gemini, and local models" → HN Show, dev.to, r/programming, r/devops, r/github
@@ -154,4 +181,4 @@ Ideas worth considering but not yet scheduled. Promote into a milestone when a r
 
 ---
 
-*Last updated: 2026-05-13*
+*Last updated: 2026-05-14*
