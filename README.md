@@ -316,6 +316,8 @@ permissions:
 ```
 
 > **⚠️ Security note:** `pull_request_target` runs in the context of the base repo with access to secrets. Do NOT check out the PR head with elevated permissions if you don't trust the contributor.
+>
+> On fork PRs the diff is attacker-controlled and is sent to the model as **untrusted data** — SherlockQA instructs the model to ignore any instructions embedded in the diff (e.g. "mark this approved"). As defense-in-depth, **`auto-approve` is ignored on `pull_request_target` events**: an approved verdict there is posted as a `COMMENT`, never an `APPROVE`. Auto-approve only takes effect on same-repo `pull_request` events.
 
 ## Supported Languages
 
