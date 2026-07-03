@@ -5,6 +5,16 @@ const github = require('@actions/github');
 const OpenAI = require('openai');
 const yaml = require('js-yaml');
 
+const SEVERITY_LEVEL = { suggestion: 1, warning: 2, error: 3 };
+const SEVERITY_EMOJI = { error: '🔴', warning: '🟡', suggestion: '🔵' };
+
+// Normalize any model-supplied severity to a known tier. Missing or unknown
+// values (e.g. 'critical', 'info', 'nit', undefined) collapse to 'suggestion'
+// so they can never bypass the min-severity filter or crash on .toUpperCase().
+function normalizeSeverity(sev) {
+  return SEVERITY_LEVEL[sev] ? sev : 'suggestion';
+}
+
 async function run() {
   try {
     // Load .sherlockqa.yml from the workspace if present. Action inputs always win.
