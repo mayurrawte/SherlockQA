@@ -8,11 +8,12 @@
 
 ## Status
 
-**Latest release:** [`v1.2.0`](https://github.com/mayurrawte/SherlockQA/releases/tag/v1.2.0) — shipped 2026-05-14
-**Live `@v1` pointer:** `1a6e3e6` (v1.2.0)
-**Currently in progress:** none — pick the next batch from v1.2 (conversational) or v1.3 (quality).
+**Latest release:** [`v1.2.1`](https://github.com/mayurrawte/SherlockQA/releases/tag/v1.2.1) — shipped 2026-07-03
+**Live `@v1` pointer:** `v1.2.1`
+**Currently in progress:** reliability/trust hardening — HIGH-severity fixes shipped; MEDIUM/LOW ([#6–#13](https://github.com/mayurrawte/SherlockQA/issues/19)) next.
 
 ### Recently shipped
+- **v1.2.1** — security & reliability: prompt-injection hardening, fork auto-approve gate, severity-crash + null-response fixes, first jest suite ([#3](https://github.com/mayurrawte/SherlockQA/issues/3), [#4](https://github.com/mayurrawte/SherlockQA/issues/4), [#5](https://github.com/mayurrawte/SherlockQA/issues/5))
 - **v1.2.0** — sticky comment, GitHub Check Run, severity breakdown, token/cost tracking
 - **v1.1.0** — Anthropic Claude, Google Gemini, Ollama, security mode, `.sherlockqa.yml`, retries, glob, truncation warning
 - **Distribution polish** — `CHANGELOG`, `CONTRIBUTING`, `SECURITY`, `FUNDING.yml`, workflow template

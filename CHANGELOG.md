@@ -12,6 +12,19 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) an
 - `/sherlock` slash commands (`review-again`, `explain`, `ignore`, `approve`)
 - See [ROADMAP.md](ROADMAP.md) for full plan.
 
+## [1.2.1]
+
+### Security
+- **Prompt-injection hardening** ([#5](https://github.com/mayurrawte/SherlockQA/issues/5)) — the PR diff is wrapped in explicit `BEGIN/END UNTRUSTED DIFF` markers and the model is instructed to treat diff content as data, never as instructions.
+- **Auto-approve disabled on `pull_request_target`** ([#5](https://github.com/mayurrawte/SherlockQA/issues/5)) — an approved verdict on a fork PR is now posted as a `COMMENT`, never an `APPROVE`, so a malicious fork diff can't steer the review into self-approving itself. Same-repo `pull_request` behavior is unchanged.
+
+### Fixed
+- **Missing or non-canonical `severity` no longer crashes the action or bypasses `min-severity`** ([#3](https://github.com/mayurrawte/SherlockQA/issues/3)) — every finding is normalized to a known tier before filtering, labeling, and counting, so the header count and severity breakdown always agree.
+- **A null model response (OpenAI/Azure refusal or content filter) no longer throws an uncatchable error** ([#4](https://github.com/mayurrawte/SherlockQA/issues/4)) — it now degrades to the safe parse-fallback.
+
+### Internal
+- Pure helpers are exported behind a guarded `module.exports`; added a jest regression suite (15 tests) covering the above fixes, and cleared pre-existing lint errors. No user-facing change.
+
 ## [1.2.0]
 
 ### Added
@@ -57,7 +70,8 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) an
 - Domain-knowledge and persona prompt injection.
 - Auto-approve verdict mode.
 
-[Unreleased]: https://github.com/mayurrawte/SherlockQA/compare/v1.2.0...HEAD
+[Unreleased]: https://github.com/mayurrawte/SherlockQA/compare/v1.2.1...HEAD
+[1.2.1]: https://github.com/mayurrawte/SherlockQA/compare/v1.2.0...v1.2.1
 [1.2.0]: https://github.com/mayurrawte/SherlockQA/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/mayurrawte/SherlockQA/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/mayurrawte/SherlockQA/releases/tag/v1.0.0
