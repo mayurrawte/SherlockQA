@@ -39766,6 +39766,12 @@ const yaml = __nccwpck_require__(4281);
 const SEVERITY_LEVEL = { suggestion: 1, warning: 2, error: 3 };
 const SEVERITY_EMOJI = { error: '🔴', warning: '🟡', suggestion: '🔵' };
 
+// Hidden markers used to recognize SherlockQA's own output so it can be updated
+// or replaced in place (independent of the use-emoji heading).
+const STICKY_MARKER = '<!-- sherlockqa:sticky -->';
+const REVIEW_MARKER = '<!-- sherlockqa:review -->';
+const COMMENT_MARKER = '<!-- sherlockqa:comment -->';
+
 // Normalize any model-supplied severity to a known tier. Missing or unknown
 // values (e.g. 'critical', 'info', 'nit', undefined) collapse to 'suggestion'
 // so they can never bypass the min-severity filter or crash on .toUpperCase().
@@ -39781,6 +39787,29 @@ function resolveReviewEvent(verdict, autoApprove, eventName) {
   if (verdict === 'approved' && autoApprove && eventName === 'pull_request') return 'APPROVE';
   if (verdict === 'do_not_merge') return 'REQUEST_CHANGES';
   return 'COMMENT';
+}
+
+// Decide whether to submit a formal PR review, and with what body. Returns null
+// when none should be posted — critically, the COMMENT verdict with the sticky
+// comment enabled posts NO review (COMMENTED reviews can't be dismissed and would
+// stack on every push). Only the dismissable terminal events, or the sticky-off
+// fallback, produce a review.
+function planFormalReview(event, updateSummaryComment, body) {
+  if (event === 'APPROVE' || event === 'REQUEST_CHANGES') {
+    const badge = event === 'APPROVE'
+      ? '✅ **SherlockQA approved this PR.**'
+      : '❌ **SherlockQA requested changes.**';
+    return {
+      event,
+      body: updateSummaryComment
+        ? `${REVIEW_MARKER}\n${badge}\n\nSee the SherlockQA summary comment for details.`
+        : `${REVIEW_MARKER}\n${body}`
+    };
+  }
+  if (!updateSummaryComment) {
+    return { event: 'COMMENT', body: `${REVIEW_MARKER}\n${body}` };
+  }
+  return null;
 }
 
 async function run() {
@@ -39829,7 +39858,7 @@ async function run() {
 
     core.info(`Reviewing PR #${prNumber} by @${prAuthor} (provider=${aiProvider}, model=${model}, mode=${mode})`);
 
-    const previousCheckedScenarios = await findAndDismissPreviousReview(octokit, owner, repo, prNumber);
+    const previousCheckedScenarios = await findPreviousState(octokit, owner, repo, prNumber);
 
     const { data: diff } = await octokit.rest.pulls.get({
       owner, repo, pull_number: prNumber,
@@ -39898,11 +39927,28 @@ async function run() {
     }
     const event = resolveReviewEvent(review.verdict, autoApprove, context.eventName);
 
-    await octokit.rest.pulls.createReview({
-      owner, repo, pull_number: prNumber,
-      commit_id: commitSha, body, event, comments: reviewComments
-    });
-    core.info('Review posted');
+    // Inline findings are managed as individual comments (replaced each run) so
+    // they never stack up. A formal review is submitted ONLY for the dismissable,
+    // terminal verdicts (APPROVE / REQUEST_CHANGES) — the common "needs changes"
+    // COMMENTED review is what used to pile up unremovably, so it's gone.
+    const inlinePosted = await syncInlineComments(octokit, owner, repo, prNumber, commitSha, reviewComments);
+    core.info(`Inline comments: ${inlinePosted} posted`);
+
+    const plan = planFormalReview(event, updateSummaryComment, body);
+    if (plan) {
+      try {
+        await octokit.rest.pulls.createReview({
+          owner, repo, pull_number: prNumber,
+          commit_id: commitSha, body: plan.body, event: plan.event
+        });
+        core.info(`Review submitted (event=${plan.event})`);
+      } catch (e) {
+        core.warning(`createReview failed (event=${plan.event}): ${e.message}`);
+        if (plan.event === 'APPROVE') {
+          core.warning('APPROVE not permitted by this token; the summary remains in the sticky comment. See the README "Enabling Auto-Approve" section.');
+        }
+      }
+    }
 
     if (updateSummaryComment) {
       await upsertStickyComment(octokit, owner, repo, prNumber, body);
@@ -39961,32 +40007,97 @@ function defaultModelFor(provider) {
   }
 }
 
-async function findAndDismissPreviousReview(octokit, owner, repo, prNumber) {
+// Matches SherlockQA's own review/comment output regardless of the use-emoji
+// setting: the heading is "## 🔍 SherlockQA's Review" or "## [SHERLOCK] SherlockQA's
+// Review", and newer output also carries a hidden REVIEW_MARKER.
+function isSherlockReview(body) {
+  if (!body) return false;
+  return body.includes(REVIEW_MARKER) || body.includes("SherlockQA's Review");
+}
+
+// Read previously-checked QA scenarios (from the sticky comment and any prior
+// reviews) and dismiss stale *dismissable* SherlockQA reviews. COMMENTED reviews
+// cannot be dismissed via the API, so we no longer post the summary as one — see
+// the posting logic in run().
+async function findPreviousState(octokit, owner, repo, prNumber) {
   const checkedScenarios = new Set();
+  const harvest = (body) => {
+    for (const m of (body || '').matchAll(/- \[x\] (.+)/gi)) checkedScenarios.add(m[1].trim());
+  };
+
   try {
-    const { data: reviews } = await octokit.rest.pulls.listReviews({
-      owner, repo, pull_number: prNumber
+    const comments = await octokit.paginate(octokit.rest.issues.listComments, {
+      owner, repo, issue_number: prNumber, per_page: 100
     });
-    const sherlockReviews = reviews.filter(r =>
-      r.body && r.body.includes("## 🔍 SherlockQA's Review")
-    );
-    for (const review of sherlockReviews) {
-      const checkedMatches = review.body.matchAll(/- \[x\] (.+)/gi);
-      for (const match of checkedMatches) checkedScenarios.add(match[1].trim());
-      try {
-        await octokit.rest.pulls.dismissReview({
-          owner, repo, pull_number: prNumber, review_id: review.id,
-          message: '🔄 Updated review available below (PR was updated)'
-        });
-        core.info(`Dismissed previous review #${review.id}`);
-      } catch (e) {
-        core.info(`Could not dismiss review #${review.id}: ${e.message}`);
+    for (const c of comments) {
+      if (c.body && (c.body.includes(STICKY_MARKER) || isSherlockReview(c.body))) harvest(c.body);
+    }
+  } catch (e) {
+    core.warning(`Failed to read previous comments: ${e.message}`);
+  }
+
+  try {
+    const reviews = await octokit.paginate(octokit.rest.pulls.listReviews, {
+      owner, repo, pull_number: prNumber, per_page: 100
+    });
+    for (const review of reviews) {
+      if (!isSherlockReview(review.body)) continue;
+      harvest(review.body);
+      // Only APPROVED / CHANGES_REQUESTED reviews are dismissable; COMMENTED are not.
+      if (review.state === 'APPROVED' || review.state === 'CHANGES_REQUESTED') {
+        try {
+          await octokit.rest.pulls.dismissReview({
+            owner, repo, pull_number: prNumber, review_id: review.id,
+            message: '🔄 Superseded by an updated SherlockQA review.'
+          });
+          core.info(`Dismissed previous review #${review.id}`);
+        } catch (e) {
+          core.info(`Could not dismiss review #${review.id}: ${e.message}`);
+        }
       }
     }
   } catch (e) {
     core.warning(`Failed to check previous reviews: ${e.message}`);
   }
+
   return checkedScenarios;
+}
+
+// Replace SherlockQA's inline findings in place: delete the ones it left last run
+// (tagged with COMMENT_MARKER), then post the current set as individual review
+// comments. This avoids stacking a new COMMENTED review on every push.
+async function syncInlineComments(octokit, owner, repo, prNumber, commitSha, comments) {
+  try {
+    const existing = await octokit.paginate(octokit.rest.pulls.listReviewComments, {
+      owner, repo, pull_number: prNumber, per_page: 100
+    });
+    for (const c of existing) {
+      if (c.body && c.body.includes(COMMENT_MARKER)) {
+        try {
+          await octokit.rest.pulls.deleteReviewComment({ owner, repo, comment_id: c.id });
+        } catch (e) {
+          core.info(`Could not delete stale comment #${c.id}: ${e.message}`);
+        }
+      }
+    }
+  } catch (e) {
+    core.warning(`Failed to list existing review comments: ${e.message}`);
+  }
+
+  let posted = 0;
+  for (const c of comments) {
+    try {
+      await octokit.rest.pulls.createReviewComment({
+        owner, repo, pull_number: prNumber, commit_id: commitSha,
+        path: c.path, position: c.position,
+        body: `${c.body}\n${COMMENT_MARKER}`
+      });
+      posted++;
+    } catch (e) {
+      core.info(`Could not post inline comment on ${c.path}: ${e.message}`);
+    }
+  }
+  return posted;
 }
 
 async function getAIReview(opts) {
@@ -40695,12 +40806,10 @@ function globToRegex(glob) {
   return new RegExp('^' + re + '$');
 }
 
-const STICKY_MARKER = '<!-- sherlockqa:sticky -->';
-
 async function upsertStickyComment(octokit, owner, repo, prNumber, body) {
   const stickyBody = `${STICKY_MARKER}\n${body}`;
   try {
-    const { data: comments } = await octokit.rest.issues.listComments({
+    const comments = await octokit.paginate(octokit.rest.issues.listComments, {
       owner, repo, issue_number: prNumber, per_page: 100
     });
     const existing = comments.find(c => c.body && c.body.includes(STICKY_MARKER));
@@ -40808,6 +40917,7 @@ if (__nccwpck_require__.c[__nccwpck_require__.s] === module) {
 module.exports = {
   normalizeSeverity,
   resolveReviewEvent,
+  planFormalReview,
   parseReviewResponse,
   parseDiffForLinePositions,
   countSeverity,
@@ -40815,6 +40925,7 @@ module.exports = {
   matchPattern,
   globToRegex,
   isScenarioPreviouslyChecked,
+  isSherlockReview,
   buildSystemPrompt,
   buildUserPrompt,
 };

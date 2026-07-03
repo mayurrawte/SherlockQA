@@ -1,7 +1,9 @@
 const {
   normalizeSeverity,
   resolveReviewEvent,
+  planFormalReview,
   parseReviewResponse,
+  isSherlockReview,
   buildSystemPrompt,
   buildUserPrompt,
 } = require('./index');
@@ -78,6 +80,55 @@ describe('parseReviewResponse (#4 — null content crash)', () => {
 
   test('unparseable content returns the fallback', () => {
     expect(parseReviewResponse('not json at all').verdict).toBe('needs_changes');
+  });
+});
+
+describe('planFormalReview (#21 — no COMMENTED review to pile up)', () => {
+  test('COMMENT verdict with sticky enabled posts NO review (the pile-up fix)', () => {
+    expect(planFormalReview('COMMENT', true, 'summary')).toBeNull();
+  });
+
+  test('COMMENT verdict with sticky disabled falls back to a COMMENT review carrying the summary', () => {
+    const plan = planFormalReview('COMMENT', false, 'full summary body');
+    expect(plan.event).toBe('COMMENT');
+    expect(plan.body).toContain('full summary body');
+    expect(plan.body).toContain('<!-- sherlockqa:review -->');
+  });
+
+  test('APPROVE posts a dismissable review; body is a badge (not the full summary) when sticky is on', () => {
+    const plan = planFormalReview('APPROVE', true, 'THE FULL SUMMARY');
+    expect(plan.event).toBe('APPROVE');
+    expect(plan.body).not.toContain('THE FULL SUMMARY');
+    expect(plan.body).toContain('approved');
+    expect(plan.body).toContain('<!-- sherlockqa:review -->');
+  });
+
+  test('REQUEST_CHANGES posts a dismissable review', () => {
+    expect(planFormalReview('REQUEST_CHANGES', true, 's').event).toBe('REQUEST_CHANGES');
+  });
+
+  test('APPROVE with sticky off carries the full summary in the review', () => {
+    expect(planFormalReview('APPROVE', false, 'THE FULL SUMMARY').body).toContain('THE FULL SUMMARY');
+  });
+});
+
+describe('isSherlockReview (#21 — emoji-independent self-detection)', () => {
+  test('matches the emoji heading (use-emoji: true)', () => {
+    expect(isSherlockReview("## 🔍 SherlockQA's Review\n\n**Verdict:** ...")).toBe(true);
+  });
+
+  test('matches the [SHERLOCK] heading (use-emoji: false) — the pynexus case that used to be missed', () => {
+    expect(isSherlockReview("## [SHERLOCK] SherlockQA's Review\n\n**Verdict:** ...")).toBe(true);
+  });
+
+  test('matches the hidden review marker regardless of heading', () => {
+    expect(isSherlockReview('<!-- sherlockqa:review -->\n✅ **SherlockQA approved this PR.**')).toBe(true);
+  });
+
+  test('does not match unrelated content', () => {
+    expect(isSherlockReview('LGTM, merging')).toBe(false);
+    expect(isSherlockReview('')).toBe(false);
+    expect(isSherlockReview(null)).toBe(false);
   });
 });
 
