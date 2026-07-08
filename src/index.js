@@ -133,7 +133,7 @@ async function run() {
     const truncated = diff.length > MAX_DIFF_CHARS;
     const diffContent = truncated ? diff.slice(0, MAX_DIFF_CHARS) + '\n\n... [diff truncated]' : diff;
 
-    const { review, usage } = await getAIReview({
+    const { review, usage, responseTruncated } = await getAIReview({
       provider: aiProvider, model, diff: diffContent, files: filesToReview,
       prAuthor, persona, domainKnowledge, maxTokens, codeQuality,
       personality, strictness: reviewStrictness, mode
@@ -169,7 +169,7 @@ async function run() {
     }
 
     const severityCounts = countSeverity(review.line_comments || []);
-    const body = buildReviewBody(review, prAuthor, previousCheckedScenarios, reviewStyle, useEmoji, truncated, severityCounts);
+    const body = buildReviewBody(review, prAuthor, previousCheckedScenarios, reviewStyle, useEmoji, truncated, severityCounts, responseTruncated);
 
     if (autoApprove && review.verdict === 'approved' && context.eventName !== 'pull_request') {
       core.warning('auto-approve is disabled outside same-repo pull_request events (e.g. pull_request_target): the fork diff is untrusted and could steer the verdict via prompt injection. Posting a COMMENT instead.');
@@ -206,7 +206,7 @@ async function run() {
     if (createCheckRun) {
       await createCheckRunSafely({
         octokit, owner, repo, commitSha, review, severityCounts,
-        reviewComments, usage, cost, model, aiProvider, truncated
+        reviewComments, usage, cost, model, aiProvider, truncated, responseTruncated
       });
     }
 
@@ -358,18 +358,34 @@ async function getAIReview(opts) {
   const userPrompt = buildUserPrompt(changedFiles, diff, prAuthor);
 
   const callers = {
-    'azure-responses': () => callAzureResponsesAPI(systemPrompt, userPrompt, model, maxTokens),
-    'azure': () => callAzureOpenAI(systemPrompt, userPrompt, model, maxTokens),
-    'anthropic': () => callAnthropic(systemPrompt, userPrompt, model, maxTokens),
-    'gemini': () => callGemini(systemPrompt, userPrompt, model, maxTokens),
-    'ollama': () => callOllama(systemPrompt, userPrompt, model, maxTokens),
-    'openai': () => callOpenAI(systemPrompt, userPrompt, model, maxTokens),
+    'azure-responses': (t) => callAzureResponsesAPI(systemPrompt, userPrompt, model, t),
+    'azure': (t) => callAzureOpenAI(systemPrompt, userPrompt, model, t),
+    'anthropic': (t) => callAnthropic(systemPrompt, userPrompt, model, t),
+    'gemini': (t) => callGemini(systemPrompt, userPrompt, model, t),
+    'ollama': (t) => callOllama(systemPrompt, userPrompt, model, t),
+    'openai': (t) => callOpenAI(systemPrompt, userPrompt, model, t),
   };
   const caller = callers[provider] || callers.openai;
-  const result = await withRetry(caller, `provider=${provider}`);
+  const totalUsage = { input: 0, output: 0 };
+  const addUsage = (u) => { totalUsage.input += u?.input || 0; totalUsage.output += u?.output || 0; };
+
+  let result = await withRetry(() => caller(maxTokens), `provider=${provider}`);
+  addUsage(result.usage);
+  if (result.truncated) {
+    // A cut-off JSON response used to silently parse-fail into a false
+    // needs_changes verdict (#8). Retry once with double the budget.
+    const bumped = maxTokens * 2;
+    core.warning(`Model response hit the max-tokens limit (${maxTokens}); retrying once with ${bumped}. Consider raising max-tokens in your workflow.`);
+    result = await withRetry(() => caller(bumped), `provider=${provider} retry`);
+    addUsage(result.usage);
+    if (result.truncated) {
+      core.warning('Model response is still truncated after the retry — the review below may be incomplete.');
+    }
+  }
   return {
     review: parseReviewResponse(result.content),
-    usage: result.usage || { input: 0, output: 0 }
+    usage: totalUsage,
+    responseTruncated: !!result.truncated
   };
 }
 
@@ -441,6 +457,7 @@ async function callOpenAI(systemPrompt, userPrompt, model, maxTokens) {
   });
   return {
     content: response.choices[0].message.content,
+    truncated: response.choices[0].finish_reason === 'length',
     usage: {
       input: response.usage?.prompt_tokens || 0,
       output: response.usage?.completion_tokens || 0
@@ -471,6 +488,7 @@ async function callAzureOpenAI(systemPrompt, userPrompt, model, maxTokens) {
   });
   return {
     content: response.choices[0].message.content,
+    truncated: response.choices[0].finish_reason === 'length',
     usage: {
       input: response.usage?.prompt_tokens || 0,
       output: response.usage?.completion_tokens || 0
@@ -511,6 +529,7 @@ async function callAzureResponsesAPI(systemPrompt, userPrompt, model, maxTokens)
   if (!content) throw new Error(`Unparseable Azure Responses output: ${JSON.stringify(result).slice(0, 500)}`);
   return {
     content,
+    truncated: result.status === 'incomplete',
     usage: {
       input: result.usage?.input_tokens || result.usage?.prompt_tokens || 0,
       output: result.usage?.output_tokens || result.usage?.completion_tokens || 0
@@ -550,6 +569,7 @@ async function callAnthropic(systemPrompt, userPrompt, model, maxTokens) {
   // We pre-filled "{", so prepend it back when parsing.
   return {
     content: '{' + text,
+    truncated: result.stop_reason === 'max_tokens',
     usage: {
       input: result.usage?.input_tokens || 0,
       output: result.usage?.output_tokens || 0
@@ -583,6 +603,7 @@ async function callGemini(systemPrompt, userPrompt, model, maxTokens) {
   if (!text) throw new Error(`Empty Gemini response: ${JSON.stringify(result).slice(0, 500)}`);
   return {
     content: text,
+    truncated: result.candidates?.[0]?.finishReason === 'MAX_TOKENS',
     usage: {
       input: result.usageMetadata?.promptTokenCount || 0,
       output: result.usageMetadata?.candidatesTokenCount || 0
@@ -615,6 +636,7 @@ async function callOllama(systemPrompt, userPrompt, model, maxTokens) {
   const result = await response.json();
   return {
     content: result.message?.content || '',
+    truncated: result.done_reason === 'length',
     usage: {
       input: result.prompt_eval_count || 0,
       output: result.eval_count || 0
@@ -922,7 +944,7 @@ function formatSeverityBreakdown(counts, useEmoji) {
   return parts.join(' · ');
 }
 
-function buildReviewBody(review, prAuthor, previousCheckedScenarios = new Set(), reviewStyle = 'compact', useEmoji = true, truncated = false, severityCounts = null) {
+function buildReviewBody(review, prAuthor, previousCheckedScenarios = new Set(), reviewStyle = 'compact', useEmoji = true, truncated = false, severityCounts = null, responseTruncated = false) {
   const e = useEmoji ? {
     detective: '🔍', summary: '📝', tests: '🧪', qa: '🎯', questions: '❓',
     quality: '🧹', verdict: '🏁', approved: '✅', needs_changes: '⚠️',
@@ -962,6 +984,10 @@ function buildReviewBody(review, prAuthor, previousCheckedScenarios = new Set(),
       parts.push(`> ${e.warning} **Heads up:** PR diff was large and got truncated — this review may have missed parts of the change. Consider splitting large PRs.\n`);
     }
 
+    if (responseTruncated) {
+      parts.push(`> ${e.warning} **Heads up:** the AI response hit the \`max-tokens\` limit and was cut off — findings may be missing and the verdict may be unreliable. Raise \`max-tokens\` in your workflow.\n`);
+    }
+
     if (review.code_quality && review.code_quality !== 'null') {
       const qualityText = typeof review.code_quality === 'string'
         ? review.code_quality
@@ -998,6 +1024,10 @@ function buildReviewBody(review, prAuthor, previousCheckedScenarios = new Set(),
 
     if (truncated) {
       parts.push(`> ${e.warning} **Heads up:** PR diff was large and got truncated — this review may have missed parts of the change.\n`);
+    }
+
+    if (responseTruncated) {
+      parts.push(`> ${e.warning} **Heads up:** the AI response hit the \`max-tokens\` limit and was cut off — findings may be missing and the verdict may be unreliable. Raise \`max-tokens\` in your workflow.\n`);
     }
 
     if (review.tests_required && review.test_suggestion) {
@@ -1107,7 +1137,7 @@ async function upsertStickyComment(octokit, owner, repo, prNumber, body) {
 
 async function createCheckRunSafely(opts) {
   const { octokit, owner, repo, commitSha, review, severityCounts,
-    usage, cost, model, aiProvider, truncated } = opts;
+    usage, cost, model, aiProvider, truncated, responseTruncated } = opts;
 
   const conclusion =
     review.verdict === 'do_not_merge' ? 'failure' :
@@ -1128,6 +1158,7 @@ async function createCheckRunSafely(opts) {
     `**Tokens:** ${usage.input} in / ${usage.output} out${cost != null ? ` · ~$${cost.toFixed(4)}` : ''}`
   ];
   if (truncated) summaryLines.push('> ⚠️ PR diff truncated — review may be incomplete.');
+  if (responseTruncated) summaryLines.push('> ⚠️ AI response hit max-tokens — review may be incomplete.');
   if (review.summary) summaryLines.push('', review.summary);
   if (review.verdict_reason) summaryLines.push('', `> ${review.verdict_reason}`);
 
@@ -1209,4 +1240,7 @@ module.exports = {
   isSherlockReview,
   buildSystemPrompt,
   buildUserPrompt,
+  buildReviewBody,
+  callAnthropic,
+  callOllama,
 };

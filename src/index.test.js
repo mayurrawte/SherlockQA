@@ -10,6 +10,9 @@ const {
   isScenarioPreviouslyChecked,
   parseDiffForLinePositions,
   makeInputResolver,
+  buildReviewBody,
+  callAnthropic,
+  callOllama,
 } = require('./index');
 
 // Silence @actions/core's ::warning:: output during the parse-fallback tests.
@@ -308,6 +311,64 @@ describe('action.yml (#9 — defaults must not pre-fill INPUT_* for overridable 
     for (const key of overridable) {
       expect(action.inputs[key].default).toBeUndefined();
     }
+  });
+});
+
+describe('response truncation (#8 — max-tokens cutoff silently flipped verdicts)', () => {
+  const origFetch = global.fetch;
+  beforeEach(() => { process.env['INPUT_ANTHROPIC-API-KEY'] = 'test-key'; });
+  afterEach(() => { global.fetch = origFetch; delete process.env['INPUT_ANTHROPIC-API-KEY']; });
+
+  test('callAnthropic flags stop_reason=max_tokens as truncated', async () => {
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        content: [{ type: 'text', text: '"summary": "cut off' }],
+        stop_reason: 'max_tokens',
+        usage: { input_tokens: 10, output_tokens: 4096 }
+      })
+    });
+    const r = await callAnthropic('sys', 'user', 'claude-sonnet-4-5', 4096);
+    expect(r.truncated).toBe(true);
+  });
+
+  test('callAnthropic normal end_turn is not truncated', async () => {
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        content: [{ type: 'text', text: '"verdict": "approved"}' }],
+        stop_reason: 'end_turn',
+        usage: { input_tokens: 10, output_tokens: 50 }
+      })
+    });
+    const r = await callAnthropic('sys', 'user', 'claude-sonnet-4-5', 4096);
+    expect(r.truncated).toBe(false);
+  });
+
+  test('callOllama flags done_reason=length as truncated', async () => {
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        message: { content: '{"summary": "cut' },
+        done_reason: 'length',
+        prompt_eval_count: 10, eval_count: 4096
+      })
+    });
+    const r = await callOllama('sys', 'user', 'llama3.1', 4096);
+    expect(r.truncated).toBe(true);
+  });
+
+  test('buildReviewBody surfaces a truncation note with a max-tokens hint', () => {
+    const review = { verdict: 'needs_changes', summary: 'Unable to parse AI response', line_comments: [], qa_scenarios: [], questions: [] };
+    const body = buildReviewBody(review, 'alice', new Set(), 'compact', true, false, null, true);
+    expect(body).toMatch(/max-tokens/);
+    expect(body).toMatch(/cut off/i);
+  });
+
+  test('buildReviewBody adds no truncation note by default', () => {
+    const review = { verdict: 'approved', summary: 'ok', line_comments: [], qa_scenarios: [], questions: [] };
+    const body = buildReviewBody(review, 'alice', new Set(), 'compact', true, false, null, false);
+    expect(body).not.toMatch(/max-tokens/);
   });
 });
 
