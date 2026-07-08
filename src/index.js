@@ -54,6 +54,17 @@ function planFormalReview(event, updateSummaryComment, body) {
   return null;
 }
 
+// After a formal review submission fails (e.g. 422 "GitHub Actions is not
+// permitted to approve pull requests"), decide the degraded retry (#6). With
+// the sticky summary disabled the body would otherwise be lost, so fall back
+// to a plain COMMENT review. With the sticky ON, the summary is already
+// posted there — a COMMENT review would just re-create the undismissable
+// pile-up (#21), so no retry.
+function planReviewFallback(plan, updateSummaryComment) {
+  if (updateSummaryComment || plan.event === 'COMMENT') return null;
+  return { event: 'COMMENT', body: plan.body };
+}
+
 // Input resolution: action input > .sherlockqa.yml > '' (code defaults apply
 // at the call sites). action.yml must NOT declare defaults for these keys —
 // the node20 runner pre-fills INPUT_* from action.yml defaults, which would
@@ -194,7 +205,19 @@ async function run() {
       } catch (e) {
         core.warning(`createReview failed (event=${plan.event}): ${e.message}`);
         if (plan.event === 'APPROVE') {
-          core.warning('APPROVE not permitted by this token; the summary remains in the sticky comment. See the README "Enabling Auto-Approve" section.');
+          core.warning('APPROVE not permitted by this token; the verdict is still visible in the summary. See the README "Enabling Auto-Approve" section.');
+        }
+        const fallback = planReviewFallback(plan, updateSummaryComment);
+        if (fallback) {
+          try {
+            await octokit.rest.pulls.createReview({
+              owner, repo, pull_number: prNumber,
+              commit_id: commitSha, body: fallback.body, event: fallback.event
+            });
+            core.info('Fell back to a COMMENT review so the summary is not lost.');
+          } catch (e2) {
+            core.warning(`COMMENT fallback also failed: ${e2.message}`);
+          }
         }
       }
     }
@@ -1230,6 +1253,7 @@ module.exports = {
   normalizeSeverity,
   resolveReviewEvent,
   planFormalReview,
+  planReviewFallback,
   parseReviewResponse,
   parseDiffForLinePositions,
   countSeverity,

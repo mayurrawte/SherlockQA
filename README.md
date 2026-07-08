@@ -261,7 +261,7 @@ This allows SherlockQA to read the PR diff and post review comments. The optiona
 
 > **⚠️ Why is auto-approve not working?**
 >
-> By default, GitHub Actions using `GITHUB_TOKEN` cannot approve pull requests. This is a GitHub security feature. If you enable `auto-approve: true` without proper permissions, the action will fall back to posting a `COMMENT` instead of `APPROVE`.
+> By default, GitHub Actions using `GITHUB_TOKEN` cannot approve pull requests. This is a GitHub security feature. If you enable `auto-approve: true` without proper permissions, the approval is skipped with a warning — the verdict still appears in the sticky summary comment and the Check Run. If you've disabled the sticky comment (`update-summary-comment: false`), the action falls back to posting a `COMMENT` review instead of `APPROVE`, so the summary is never lost.
 
 To use `auto-approve: true`, you need **one** of the following:
 

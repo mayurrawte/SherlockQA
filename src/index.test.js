@@ -2,6 +2,7 @@ const {
   normalizeSeverity,
   resolveReviewEvent,
   planFormalReview,
+  planReviewFallback,
   parseReviewResponse,
   isSherlockReview,
   buildSystemPrompt,
@@ -116,6 +117,27 @@ describe('planFormalReview (#21 — no COMMENTED review to pile up)', () => {
 
   test('APPROVE with sticky off carries the full summary in the review', () => {
     expect(planFormalReview('APPROVE', false, 'THE FULL SUMMARY').body).toContain('THE FULL SUMMARY');
+  });
+});
+
+describe('planReviewFallback (#6 — failed formal review must not lose the summary)', () => {
+  test('sticky ON: no COMMENT retry (would re-create the #21 pile-up); summary lives in the sticky', () => {
+    expect(planReviewFallback({ event: 'APPROVE', body: 'b' }, true)).toBeNull();
+    expect(planReviewFallback({ event: 'REQUEST_CHANGES', body: 'b' }, true)).toBeNull();
+  });
+
+  test('sticky OFF: failed APPROVE degrades to a COMMENT review with the same body', () => {
+    const fb = planReviewFallback({ event: 'APPROVE', body: 'full body' }, false);
+    expect(fb.event).toBe('COMMENT');
+    expect(fb.body).toBe('full body');
+  });
+
+  test('sticky OFF: failed REQUEST_CHANGES degrades to a COMMENT review', () => {
+    expect(planReviewFallback({ event: 'REQUEST_CHANGES', body: 'b' }, false).event).toBe('COMMENT');
+  });
+
+  test('a failed COMMENT review is never retried as itself', () => {
+    expect(planReviewFallback({ event: 'COMMENT', body: 'b' }, false)).toBeNull();
   });
 });
 
