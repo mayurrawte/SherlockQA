@@ -12,6 +12,17 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) an
 - `/sherlock` slash commands (`review-again`, `explain`, `ignore`, `approve`)
 - See [ROADMAP.md](ROADMAP.md) for full plan.
 
+## [1.2.2]
+
+### Fixed
+- **Reviews no longer pile up on every push** ([#21](https://github.com/mayurrawte/SherlockQA/issues/21)) — SherlockQA now recognizes its own prior reviews regardless of the `use-emoji` setting via a hidden `<!-- sherlockqa:review -->` marker, and the summary no longer creates an undismissable `COMMENTED` review.
+- **Inline findings are synced, not stacked** — posted as individually-tagged review comments that are deleted and re-posted on each run (`syncInlineComments`).
+- **Formal reviews only for dismissable terminal verdicts** (`APPROVE` / `REQUEST_CHANGES`) — the common "needs changes" outcome now surfaces via the sticky summary and Check Run instead of an un-dismissable review. With `update-summary-comment: false`, the legacy single `COMMENT` review is still posted.
+- **Sticky-comment lookup is now paginated** ([#12](https://github.com/mayurrawte/SherlockQA/issues/12)) — busy PRs no longer accumulate duplicate sticky comments.
+
+### Internal
+- Jest suite grown to 24 tests, adding `planFormalReview` and `isSherlockReview` regressions.
+
 ## [1.2.1]
 
 ### Security
@@ -70,7 +81,8 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) an
 - Domain-knowledge and persona prompt injection.
 - Auto-approve verdict mode.
 
-[Unreleased]: https://github.com/mayurrawte/SherlockQA/compare/v1.2.1...HEAD
+[Unreleased]: https://github.com/mayurrawte/SherlockQA/compare/v1.2.2...HEAD
+[1.2.2]: https://github.com/mayurrawte/SherlockQA/compare/v1.2.1...v1.2.2
 [1.2.1]: https://github.com/mayurrawte/SherlockQA/compare/v1.2.0...v1.2.1
 [1.2.0]: https://github.com/mayurrawte/SherlockQA/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/mayurrawte/SherlockQA/compare/v1.0.0...v1.1.0

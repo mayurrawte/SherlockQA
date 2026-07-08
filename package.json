@@ -1,6 +1,6 @@
 {
   "name": "sherlockqa",
-  "version": "1.2.1",
+  "version": "1.2.2",
   "description": "AI-powered code review and QA assistant - GitHub Action",
   "author": "mayurrawte",
   "license": "MIT",
