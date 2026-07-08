@@ -6,6 +6,7 @@ const {
   isSherlockReview,
   buildSystemPrompt,
   buildUserPrompt,
+  estimateCost,
 } = require('./index');
 
 // Silence @actions/core's ::warning:: output during the parse-fallback tests.
@@ -129,6 +130,34 @@ describe('isSherlockReview (#21 — emoji-independent self-detection)', () => {
     expect(isSherlockReview('LGTM, merging')).toBe(false);
     expect(isSherlockReview('')).toBe(false);
     expect(isSherlockReview(null)).toBe(false);
+  });
+});
+
+describe('estimateCost (#10 — versioned model IDs matched the shortest prefix)', () => {
+  const M = 1_000_000;
+
+  test('versioned gpt-4.1-mini resolves to gpt-4.1-mini pricing, not gpt-4 (was 75x too high)', () => {
+    expect(estimateCost('gpt-4.1-mini-2025-04-14', { input: M, output: 0 })).toBeCloseTo(0.40);
+    expect(estimateCost('gpt-4.1-mini-2025-04-14', { input: 0, output: M })).toBeCloseTo(1.60);
+  });
+
+  test('versioned gpt-5-mini resolves to gpt-5-mini pricing, not gpt-5', () => {
+    expect(estimateCost('gpt-5-mini-2025-08-07', { input: M, output: 0 })).toBeCloseTo(0.50);
+  });
+
+  test('exact IDs still resolve exactly', () => {
+    expect(estimateCost('gpt-4', { input: M, output: 0 })).toBeCloseTo(30.00);
+    expect(estimateCost('claude-sonnet-4-5', { input: M, output: M })).toBeCloseTo(18.00);
+  });
+
+  test('versioned claude ID resolves via prefix', () => {
+    expect(estimateCost('claude-sonnet-4-5-20251001', { input: M, output: 0 })).toBeCloseTo(3.00);
+  });
+
+  test('unknown model or empty usage returns null', () => {
+    expect(estimateCost('llama3.1', { input: M, output: M })).toBeNull();
+    expect(estimateCost('gpt-4o-mini', { input: 0, output: 0 })).toBeNull();
+    expect(estimateCost('gpt-4o-mini', null)).toBeNull();
   });
 });
 

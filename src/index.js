@@ -388,10 +388,13 @@ const PRICING = {
 
 function estimateCost(model, usage) {
   if (!usage || (!usage.input && !usage.output)) return null;
-  // Match by prefix so versioned model IDs (claude-sonnet-4-5-20251001) still resolve.
+  // Match by prefix so versioned model IDs (claude-sonnet-4-5-20251001) still
+  // resolve; longest key first so gpt-4.1-mini-* can never match gpt-4 (#10).
   let entry = PRICING[model];
   if (!entry) {
-    const match = Object.keys(PRICING).find(k => model && model.startsWith(k));
+    const match = Object.keys(PRICING)
+      .sort((a, b) => b.length - a.length)
+      .find(k => model && model.startsWith(k));
     if (match) entry = PRICING[match];
   }
   if (!entry) return null;
