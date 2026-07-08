@@ -54,24 +54,31 @@ function planFormalReview(event, updateSummaryComment, body) {
   return null;
 }
 
+// Input resolution: action input > .sherlockqa.yml > '' (code defaults apply
+// at the call sites). action.yml must NOT declare defaults for these keys —
+// the node20 runner pre-fills INPUT_* from action.yml defaults, which would
+// make core.getInput() non-empty and the repo-config fallback unreachable (#9).
+function makeInputResolver(repoConfig) {
+  return (name, opts = {}) => {
+    const fromAction = core.getInput(name, opts);
+    if (fromAction !== '' && fromAction != null) return fromAction;
+    const fromConfig = repoConfig[name];
+    if (fromConfig != null) return String(fromConfig);
+    return '';
+  };
+}
+
 async function run() {
   try {
     // Load .sherlockqa.yml from the workspace if present. Action inputs always win.
     const repoConfig = loadRepoConfig();
-
-    const getInput = (name, opts = {}) => {
-      const fromAction = core.getInput(name, opts);
-      if (fromAction !== '' && fromAction != null) return fromAction;
-      const fromConfig = repoConfig[name];
-      if (fromConfig != null) return String(fromConfig);
-      return '';
-    };
+    const getInput = makeInputResolver(repoConfig);
 
     const githubToken = core.getInput('github-token', { required: true });
     const aiProvider = getInput('ai-provider') || 'openai';
     const model = getInput('model') || defaultModelFor(aiProvider);
     const minSeverity = getInput('min-severity') || 'warning';
-    const ignorePatterns = (getInput('ignore-patterns') || '')
+    const ignorePatterns = (getInput('ignore-patterns') || '*.md,*.txt,package-lock.json,yarn.lock')
       .split(',').map(p => p.trim()).filter(Boolean);
     const persona = getInput('persona') || '';
     const domainKnowledge = getInput('domain-knowledge') || '';
@@ -1188,6 +1195,7 @@ if (require.main === module) {
 }
 
 module.exports = {
+  makeInputResolver,
   normalizeSeverity,
   resolveReviewEvent,
   planFormalReview,

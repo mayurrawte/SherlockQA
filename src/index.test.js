@@ -9,6 +9,7 @@ const {
   estimateCost,
   isScenarioPreviouslyChecked,
   parseDiffForLinePositions,
+  makeInputResolver,
 } = require('./index');
 
 // Silence @actions/core's ::warning:: output during the parse-fallback tests.
@@ -269,6 +270,44 @@ describe('parseDiffForLinePositions (#7 — phantom positions leak into the prev
     ].join('\n');
     // ctx=1, +a=2, second @@=3, ctx=4, +b=5
     expect(parseDiffForLinePositions(diff)['m.js']).toEqual({ 1: 1, 2: 2, 10: 4, 11: 5 });
+  });
+});
+
+describe('makeInputResolver (#9 — .sherlockqa.yml silently ignored)', () => {
+  afterEach(() => { delete process.env['INPUT_AI-PROVIDER']; });
+
+  test('repo config applies when the action input is unset', () => {
+    const getInput = makeInputResolver({ 'ai-provider': 'anthropic' });
+    expect(getInput('ai-provider')).toBe('anthropic');
+  });
+
+  test('action input wins over repo config', () => {
+    process.env['INPUT_AI-PROVIDER'] = 'gemini';
+    const getInput = makeInputResolver({ 'ai-provider': 'anthropic' });
+    expect(getInput('ai-provider')).toBe('gemini');
+  });
+
+  test('YAML non-string values are stringified (auto-approve: true)', () => {
+    const getInput = makeInputResolver({ 'auto-approve': true });
+    expect(getInput('auto-approve')).toBe('true');
+  });
+
+  test('unset everywhere returns empty string', () => {
+    expect(makeInputResolver({})('ai-provider')).toBe('');
+  });
+});
+
+describe('action.yml (#9 — defaults must not pre-fill INPUT_* for overridable keys)', () => {
+  test('config-overridable inputs carry no action.yml default', () => {
+    const yaml = require('js-yaml');
+    const fs = require('fs');
+    const action = yaml.load(fs.readFileSync(`${__dirname}/../action.yml`, 'utf8'));
+    const overridable = ['ai-provider', 'mode', 'min-severity', 'ignore-patterns',
+      'max-tokens', 'auto-approve', 'code-quality', 'review-style', 'use-emoji',
+      'personality', 'review-strictness', 'update-summary-comment', 'create-check-run'];
+    for (const key of overridable) {
+      expect(action.inputs[key].default).toBeUndefined();
+    }
   });
 });
 
