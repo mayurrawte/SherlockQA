@@ -1143,12 +1143,16 @@ function isScenarioPreviouslyChecked(scenario, previousCheckedScenarios) {
   for (const checked of previousCheckedScenarios) {
     const normalizedChecked = normalize(checked);
     if (normalizedScenario === normalizedChecked) return true;
-    if (normalizedScenario.includes(normalizedChecked) || normalizedChecked.includes(normalizedScenario)) return true;
-    const scenarioWords = new Set(normalizedScenario.split(/\s+/));
-    const checkedWords = new Set(normalizedChecked.split(/\s+/));
+    // Fuzzy carryover only for near-identical scenarios: ≥90% of the smaller
+    // word set shared AND at least 4 words in common. A one-word action change
+    // ("upload" → "delete") must NOT inherit the checkmark (#11), so the old
+    // bare-substring rule and 0.7 threshold are gone. False negatives are the
+    // safe direction — worst case QA re-tests a scenario.
+    const scenarioWords = new Set(normalizedScenario.split(/\s+/).filter(Boolean));
+    const checkedWords = new Set(normalizedChecked.split(/\s+/).filter(Boolean));
     const intersection = [...scenarioWords].filter(w => checkedWords.has(w));
     const minSize = Math.min(scenarioWords.size, checkedWords.size);
-    if (minSize > 0 && intersection.length / minSize >= 0.7) return true;
+    if (minSize > 0 && intersection.length >= 4 && intersection.length / minSize >= 0.9) return true;
   }
   return false;
 }

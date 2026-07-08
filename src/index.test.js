@@ -7,6 +7,7 @@ const {
   buildSystemPrompt,
   buildUserPrompt,
   estimateCost,
+  isScenarioPreviouslyChecked,
 } = require('./index');
 
 // Silence @actions/core's ::warning:: output during the parse-fallback tests.
@@ -158,6 +159,33 @@ describe('estimateCost (#10 — versioned model IDs matched the shortest prefix)
     expect(estimateCost('llama3.1', { input: M, output: M })).toBeNull();
     expect(estimateCost('gpt-4o-mini', { input: 0, output: 0 })).toBeNull();
     expect(estimateCost('gpt-4o-mini', null)).toBeNull();
+  });
+});
+
+describe('isScenarioPreviouslyChecked (#11 — fuzzy match pre-checked untested scenarios)', () => {
+  test('one-word action change is NOT carried over (upload vs delete)', () => {
+    const prev = new Set(['Verify user can upload a file']);
+    expect(isScenarioPreviouslyChecked('Verify user can delete a file', prev)).toBe(false);
+  });
+
+  test('substring containment alone is NOT a match anymore', () => {
+    const prev = new Set(['Test login']);
+    expect(isScenarioPreviouslyChecked('Test login with expired token and locked account', prev)).toBe(false);
+  });
+
+  test('exact scenario (modulo case/punctuation) still carries its checkmark', () => {
+    const prev = new Set(['verify user can upload a file!']);
+    expect(isScenarioPreviouslyChecked('Verify user can upload a file', prev)).toBe(true);
+  });
+
+  test('long scenario reworded by one word still carries its checkmark', () => {
+    const prev = new Set(['Verify the user can upload a file to the shared workspace folder']);
+    expect(isScenarioPreviouslyChecked('Verify the user can upload a file to the shared workspace directory', prev)).toBe(true);
+  });
+
+  test('short scenarios only match exactly (min absolute overlap)', () => {
+    const prev = new Set(['Check dark mode']);
+    expect(isScenarioPreviouslyChecked('Check light mode', prev)).toBe(false);
   });
 });
 
