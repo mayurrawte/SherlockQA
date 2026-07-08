@@ -8,11 +8,12 @@
 
 ## Status
 
-**Latest release:** [`v1.2.1`](https://github.com/mayurrawte/SherlockQA/releases/tag/v1.2.1) — shipped 2026-07-03
-**Live `@v1` pointer:** `v1.2.1`
-**Currently in progress:** reliability/trust hardening — HIGH-severity fixes shipped; MEDIUM/LOW ([#6–#13](https://github.com/mayurrawte/SherlockQA/issues/19)) next.
+**Latest release:** [`v1.2.2`](https://github.com/mayurrawte/SherlockQA/releases/tag/v1.2.2) — shipped 2026-07-08
+**Live `@v1` pointer:** `v1.2.2`
+**Currently in progress:** reliability/trust hardening — HIGH fixes + review pile-up shipped; remaining MEDIUM/LOW ([#6–#11, #13](https://github.com/mayurrawte/SherlockQA/issues/19)) next.
 
 ### Recently shipped
+- **v1.2.2** — review pile-up fix: emoji-independent self-detection, synced inline comments, formal reviews only for terminal verdicts, paginated sticky lookup ([#21](https://github.com/mayurrawte/SherlockQA/issues/21), [#12](https://github.com/mayurrawte/SherlockQA/issues/12))
 - **v1.2.1** — security & reliability: prompt-injection hardening, fork auto-approve gate, severity-crash + null-response fixes, first jest suite ([#3](https://github.com/mayurrawte/SherlockQA/issues/3), [#4](https://github.com/mayurrawte/SherlockQA/issues/4), [#5](https://github.com/mayurrawte/SherlockQA/issues/5))
 - **v1.2.0** — sticky comment, GitHub Check Run, severity breakdown, token/cost tracking
 - **v1.1.0** — Anthropic Claude, Google Gemini, Ollama, security mode, `.sherlockqa.yml`, retries, glob, truncation warning
@@ -73,7 +74,16 @@ Three pillars:
 - [x] **Severity breakdown in verdict header** — `0 🔴 · 2 🟡 · 1 🔵`
 - [x] **Cost & token logging** — `tokens-in`, `tokens-out`, `cost-usd` outputs; pricing table for OpenAI, Anthropic, Gemini
 
-**v1.2.1 — Interactive *(WIP — next up)***
+**v1.2.1 — Security & reliability ✅ shipped 2026-07-03**
+- [x] **Prompt-injection hardening + fork auto-approve gate** ([#5](https://github.com/mayurrawte/SherlockQA/issues/5))
+- [x] **Severity-normalization crash/bypass fix** ([#3](https://github.com/mayurrawte/SherlockQA/issues/3)) + **null-response crash fix** ([#4](https://github.com/mayurrawte/SherlockQA/issues/4))
+- [x] **First jest regression suite** behind guarded `module.exports`
+
+**v1.2.2 — Review lifecycle ✅ shipped 2026-07-08**
+- [x] **Stop review pile-up** — emoji-independent self-detection, synced inline comments, formal review only for terminal verdicts ([#21](https://github.com/mayurrawte/SherlockQA/issues/21))
+- [x] **Paginated sticky-comment lookup** ([#12](https://github.com/mayurrawte/SherlockQA/issues/12))
+
+**v1.2.3 — Interactive *(planned)***
 - [ ] **`@sherlock` mention-to-respond** — listen on `issue_comment`, reply on the review thread
 - [ ] **`/sherlock` slash commands** — `review-again`, `explain <line>`, `ignore`, `approve`
 
@@ -182,4 +192,4 @@ Ideas worth considering but not yet scheduled. Promote into a milestone when a r
 
 ---
 
-*Last updated: 2026-05-14*
+*Last updated: 2026-07-08*
