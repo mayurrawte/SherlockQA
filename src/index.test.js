@@ -8,6 +8,7 @@ const {
   buildUserPrompt,
   estimateCost,
   isScenarioPreviouslyChecked,
+  parseDiffForLinePositions,
 } = require('./index');
 
 // Silence @actions/core's ::warning:: output during the parse-fallback tests.
@@ -186,6 +187,88 @@ describe('isScenarioPreviouslyChecked (#11 — fuzzy match pre-checked untested 
   test('short scenarios only match exactly (min absolute overlap)', () => {
     const prev = new Set(['Check dark mode']);
     expect(isScenarioPreviouslyChecked('Check light mode', prev)).toBe(false);
+  });
+});
+
+describe('parseDiffForLinePositions (#7 — phantom positions leak into the previous file)', () => {
+  const TWO_FILE_DIFF = [
+    'diff --git a/a.js b/a.js',
+    'index 1111111..2222222 100644',
+    '--- a/a.js',
+    '+++ b/a.js',
+    '@@ -1,2 +1,3 @@',
+    ' line1',
+    '+line2',
+    ' line3',
+    'diff --git a/b.js b/b.js',
+    'index 3333333..4444444 100644',
+    '--- a/b.js',
+    '+++ b/b.js',
+    '@@ -1 +1,2 @@',
+    ' x',
+    '+y',
+  ].join('\n');
+
+  test('no positions beyond a file\'s own diff length (the phantom-position bug)', () => {
+    const map = parseDiffForLinePositions(TWO_FILE_DIFF);
+    expect(map['a.js']).toEqual({ 1: 1, 2: 2, 3: 3 });
+    expect(map['b.js']).toEqual({ 1: 1, 2: 2 });
+  });
+
+  test('deleted files (+++ /dev/null) produce no addressable positions and do not pollute neighbors', () => {
+    const diff = [
+      'diff --git a/gone.js b/gone.js',
+      'deleted file mode 100644',
+      'index 1111111..0000000',
+      '--- a/gone.js',
+      '+++ /dev/null',
+      '@@ -1,2 +0,0 @@',
+      '-old1',
+      '-old2',
+      'diff --git a/kept.js b/kept.js',
+      'index 5555555..6666666 100644',
+      '--- a/kept.js',
+      '+++ b/kept.js',
+      '@@ -1 +1 @@',
+      '-before',
+      '+after',
+    ].join('\n');
+    const map = parseDiffForLinePositions(diff);
+    expect(map['gone.js']).toBeUndefined();
+    expect(map['kept.js']).toEqual({ 1: 2 });
+  });
+
+  test('"\\ No newline at end of file" counts toward position (final-line edits)', () => {
+    const diff = [
+      'diff --git a/x.js b/x.js',
+      'index 1111111..2222222 100644',
+      '--- a/x.js',
+      '+++ b/x.js',
+      '@@ -1 +1 @@',
+      '-old',
+      '\\ No newline at end of file',
+      '+new',
+      '\\ No newline at end of file',
+    ].join('\n');
+    // Positions: -old=1, \=2, +new=3 — GitHub counts the backslash line.
+    expect(parseDiffForLinePositions(diff)['x.js']).toEqual({ 1: 3 });
+  });
+
+  test('multi-hunk files keep counting across hunk headers', () => {
+    const diff = [
+      'diff --git a/m.js b/m.js',
+      'index 1111111..2222222 100644',
+      '--- a/m.js',
+      '+++ b/m.js',
+      '@@ -1,2 +1,2 @@',
+      ' ctx',
+      '+a',
+      '@@ -10,2 +10,2 @@',
+      ' ctx',
+      '+b',
+    ].join('\n');
+    // ctx=1, +a=2, second @@=3, ctx=4, +b=5
+    expect(parseDiffForLinePositions(diff)['m.js']).toEqual({ 1: 1, 2: 2, 10: 4, 11: 5 });
   });
 });
 

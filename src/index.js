@@ -843,27 +843,51 @@ function parseDiffForLinePositions(diffText) {
   let currentFile = null;
   let diffPosition = 0;
   let currentNewLine = 0;
+  let inHunk = false;
+
   for (const line of diffText.split('\n')) {
-    if (line.startsWith('+++ b/')) {
-      currentFile = line.slice(6);
-      fileLineMap[currentFile] = {};
-      diffPosition = 0;
+    // Every file section starts with "diff --git". Leaving the previous file
+    // here guarantees its header lines (index, --- a/, +++ b/) can never be
+    // recorded as the previous file's trailing positions (#7).
+    if (line.startsWith('diff --git ')) {
+      currentFile = null;
+      inHunk = false;
       continue;
     }
-    if (!currentFile) continue;
+
+    if (!currentFile) {
+      // Only "+++ b/<path>" opens an addressable file. "+++ /dev/null"
+      // (deleted file) has no new side, so its hunks stay unaddressable.
+      if (line.startsWith('+++ b/')) {
+        currentFile = line.slice(6);
+        fileLineMap[currentFile] = {};
+        diffPosition = 0; // GitHub positions count per file, from its first @@
+      }
+      continue;
+    }
+
     const hunkMatch = line.match(/^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
     if (hunkMatch) {
       currentNewLine = parseInt(hunkMatch[1], 10);
       diffPosition++;
+      inHunk = true;
       continue;
     }
-    if (line.startsWith('+') && !line.startsWith('+++')) {
+    if (!inHunk) continue;
+
+    // Inside a hunk, +/- prefixes always mean content — a real next-file
+    // "+++ b/" can't appear here because "diff --git" resets inHunk first.
+    if (line.startsWith('+')) {
       fileLineMap[currentFile][currentNewLine] = diffPosition;
       currentNewLine++;
       diffPosition++;
-    } else if (line.startsWith('-') && !line.startsWith('---')) {
+    } else if (line.startsWith('-')) {
       diffPosition++;
-    } else if (!line.startsWith('\\')) {
+    } else if (line.startsWith('\\')) {
+      // "\ No newline at end of file" occupies a diff line — it counts toward
+      // position but maps to no new-side line.
+      diffPosition++;
+    } else {
       fileLineMap[currentFile][currentNewLine] = diffPosition;
       currentNewLine++;
       diffPosition++;
