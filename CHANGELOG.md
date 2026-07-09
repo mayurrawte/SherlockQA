@@ -7,6 +7,13 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) an
 
 ## [Unreleased]
 
+### Planned
+- `@sherlock` mention-to-respond on review threads
+- `/sherlock` slash commands (`review-again`, `explain`, `ignore`, `approve`)
+- See [ROADMAP.md](ROADMAP.md) for full plan.
+
+## [1.2.3]
+
 ### Fixed
 - **Phantom inline-comment positions in multi-file diffs** ([#7](https://github.com/mayurrawte/SherlockQA/issues/7)) — the next file's diff headers were recorded as the previous file's trailing positions; deleted files and `\ No newline` markers are now handled correctly.
 - **`max-tokens` truncation no longer silently flags a clean PR** ([#8](https://github.com/mayurrawte/SherlockQA/issues/8)) — providers report when output was cut off; the action retries once with a doubled budget and surfaces a clear note in the review and Check Run.
@@ -15,10 +22,8 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) an
 - **New QA scenarios are no longer pre-checked** ([#11](https://github.com/mayurrawte/SherlockQA/issues/11)) — the carryover matcher requires near-identical scenarios instead of a loose 70% word overlap or bare substring.
 - **A failed formal review no longer loses the summary** ([#6](https://github.com/mayurrawte/SherlockQA/issues/6)) — with the sticky comment disabled, a failed `APPROVE`/`REQUEST_CHANGES` degrades to a `COMMENT` review; the README now describes the real fallback behavior.
 
-### Planned
-- `@sherlock` mention-to-respond on review threads
-- `/sherlock` slash commands (`review-again`, `explain`, `ignore`, `approve`)
-- See [ROADMAP.md](ROADMAP.md) for full plan.
+### Internal
+- Jest suite grown to 52 tests; new exported helpers `makeInputResolver`, `planReviewFallback`, `buildReviewBody`, `callAnthropic`, `callOllama` for regression coverage.
 
 ## [1.2.2]
 
@@ -89,7 +94,8 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) an
 - Domain-knowledge and persona prompt injection.
 - Auto-approve verdict mode.
 
-[Unreleased]: https://github.com/mayurrawte/SherlockQA/compare/v1.2.2...HEAD
+[Unreleased]: https://github.com/mayurrawte/SherlockQA/compare/v1.2.3...HEAD
+[1.2.3]: https://github.com/mayurrawte/SherlockQA/compare/v1.2.2...v1.2.3
 [1.2.2]: https://github.com/mayurrawte/SherlockQA/compare/v1.2.1...v1.2.2
 [1.2.1]: https://github.com/mayurrawte/SherlockQA/compare/v1.2.0...v1.2.1
 [1.2.0]: https://github.com/mayurrawte/SherlockQA/compare/v1.1.0...v1.2.0
