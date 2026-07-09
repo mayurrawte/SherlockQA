@@ -14,9 +14,8 @@ inputs:
 
   # AI Provider
   ai-provider:
-    description: 'AI provider: openai, anthropic, gemini, azure, azure-responses, ollama'
+    description: 'AI provider: openai, anthropic, gemini, azure, azure-responses, ollama (default: openai). Overridable via .sherlockqa.yml.'
     required: false
-    default: 'openai'
 
   # OpenAI Configuration
   openai-api-key:
@@ -59,17 +58,14 @@ inputs:
 
   # Review Configuration
   mode:
-    description: 'Review mode: general (default) or security (audit for vulnerabilities only)'
+    description: 'Review mode: general (default) or security (audit for vulnerabilities only). Overridable via .sherlockqa.yml.'
     required: false
-    default: 'general'
   min-severity:
-    description: 'Minimum severity to report (error, warning, suggestion)'
+    description: 'Minimum severity to report: error, warning, suggestion (default: warning). Overridable via .sherlockqa.yml.'
     required: false
-    default: 'warning'
   ignore-patterns:
-    description: 'Comma-separated list of file patterns to ignore. Supports glob (*, **, ?).'
+    description: 'Comma-separated list of file patterns to ignore. Supports glob (*, **, ?). Default: *.md,*.txt,package-lock.json,yarn.lock. Overridable via .sherlockqa.yml.'
     required: false
-    default: '*.md,*.txt,package-lock.json,yarn.lock'
 
   # Custom Prompts
   persona:
@@ -81,52 +77,43 @@ inputs:
 
   # Max tokens for response
   max-tokens:
-    description: 'Maximum tokens for AI response'
+    description: 'Maximum tokens for AI response (default: 4096). Overridable via .sherlockqa.yml.'
     required: false
-    default: '4096'
 
   # Approval Configuration
   auto-approve:
-    description: 'Submit APPROVE when verdict is approved (requires PAT or repo settings to allow Actions to approve PRs)'
+    description: 'Submit APPROVE when verdict is approved (default: false; requires PAT or repo settings to allow Actions to approve PRs). Overridable via .sherlockqa.yml.'
     required: false
-    default: 'false'
 
   # Code Quality Analysis
   code-quality:
-    description: 'Enable code quality analysis (checks for repetitive code, code smells, maintainability issues)'
+    description: 'Enable code quality analysis — repetitive code, code smells, maintainability issues (default: false). Overridable via .sherlockqa.yml.'
     required: false
-    default: 'false'
 
   # Output Style
   review-style:
-    description: 'Review output style - compact (verdict at top, concise) or detailed (verbose)'
+    description: 'Review output style - compact (verdict at top, concise) or detailed (verbose). Default: compact. Overridable via .sherlockqa.yml.'
     required: false
-    default: 'compact'
 
   use-emoji:
-    description: 'Use emojis in review output'
+    description: 'Use emojis in review output (default: true). Overridable via .sherlockqa.yml.'
     required: false
-    default: 'true'
 
   personality:
-    description: 'Review personality - detective (Sherlock), bro (casual dude), desi (Hinglish), professional (formal), enthusiastic (hyped up)'
+    description: 'Review personality - detective (Sherlock), bro (casual dude), desi (Hinglish), professional (formal), enthusiastic (hyped up). Default: detective. Overridable via .sherlockqa.yml.'
     required: false
-    default: 'detective'
 
   review-strictness:
-    description: 'How strict the review should be - lenient (only critical issues), balanced (reasonable checks), strict (thorough, flags more issues)'
+    description: 'How strict the review should be - lenient (only critical issues), balanced (reasonable checks), strict (thorough, flags more issues). Default: balanced. Overridable via .sherlockqa.yml.'
     required: false
-    default: 'balanced'
 
   update-summary-comment:
-    description: 'Maintain a single sticky issue-comment with the current review summary (updated in place each run)'
+    description: 'Maintain a single sticky issue-comment with the current review summary, updated in place each run (default: true). Overridable via .sherlockqa.yml.'
     required: false
-    default: 'true'
 
   create-check-run:
-    description: 'Create a GitHub Check Run so the verdict and annotations appear in the PR Checks column (requires checks:write permission)'
+    description: 'Create a GitHub Check Run so the verdict and annotations appear in the PR Checks column — requires checks:write permission (default: true). Overridable via .sherlockqa.yml.'
     required: false
-    default: 'true'
 
 outputs:
   verdict:

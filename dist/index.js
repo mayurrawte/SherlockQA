@@ -39812,24 +39812,42 @@ function planFormalReview(event, updateSummaryComment, body) {
   return null;
 }
 
+// After a formal review submission fails (e.g. 422 "GitHub Actions is not
+// permitted to approve pull requests"), decide the degraded retry (#6). With
+// the sticky summary disabled the body would otherwise be lost, so fall back
+// to a plain COMMENT review. With the sticky ON, the summary is already
+// posted there — a COMMENT review would just re-create the undismissable
+// pile-up (#21), so no retry.
+function planReviewFallback(plan, updateSummaryComment) {
+  if (updateSummaryComment || plan.event === 'COMMENT') return null;
+  return { event: 'COMMENT', body: plan.body };
+}
+
+// Input resolution: action input > .sherlockqa.yml > '' (code defaults apply
+// at the call sites). action.yml must NOT declare defaults for these keys —
+// the node20 runner pre-fills INPUT_* from action.yml defaults, which would
+// make core.getInput() non-empty and the repo-config fallback unreachable (#9).
+function makeInputResolver(repoConfig) {
+  return (name, opts = {}) => {
+    const fromAction = core.getInput(name, opts);
+    if (fromAction !== '' && fromAction != null) return fromAction;
+    const fromConfig = repoConfig[name];
+    if (fromConfig != null) return String(fromConfig);
+    return '';
+  };
+}
+
 async function run() {
   try {
     // Load .sherlockqa.yml from the workspace if present. Action inputs always win.
     const repoConfig = loadRepoConfig();
-
-    const getInput = (name, opts = {}) => {
-      const fromAction = core.getInput(name, opts);
-      if (fromAction !== '' && fromAction != null) return fromAction;
-      const fromConfig = repoConfig[name];
-      if (fromConfig != null) return String(fromConfig);
-      return '';
-    };
+    const getInput = makeInputResolver(repoConfig);
 
     const githubToken = core.getInput('github-token', { required: true });
     const aiProvider = getInput('ai-provider') || 'openai';
     const model = getInput('model') || defaultModelFor(aiProvider);
     const minSeverity = getInput('min-severity') || 'warning';
-    const ignorePatterns = (getInput('ignore-patterns') || '')
+    const ignorePatterns = (getInput('ignore-patterns') || '*.md,*.txt,package-lock.json,yarn.lock')
       .split(',').map(p => p.trim()).filter(Boolean);
     const persona = getInput('persona') || '';
     const domainKnowledge = getInput('domain-knowledge') || '';
@@ -39884,7 +39902,7 @@ async function run() {
     const truncated = diff.length > MAX_DIFF_CHARS;
     const diffContent = truncated ? diff.slice(0, MAX_DIFF_CHARS) + '\n\n... [diff truncated]' : diff;
 
-    const { review, usage } = await getAIReview({
+    const { review, usage, responseTruncated } = await getAIReview({
       provider: aiProvider, model, diff: diffContent, files: filesToReview,
       prAuthor, persona, domainKnowledge, maxTokens, codeQuality,
       personality, strictness: reviewStrictness, mode
@@ -39920,7 +39938,7 @@ async function run() {
     }
 
     const severityCounts = countSeverity(review.line_comments || []);
-    const body = buildReviewBody(review, prAuthor, previousCheckedScenarios, reviewStyle, useEmoji, truncated, severityCounts);
+    const body = buildReviewBody(review, prAuthor, previousCheckedScenarios, reviewStyle, useEmoji, truncated, severityCounts, responseTruncated);
 
     if (autoApprove && review.verdict === 'approved' && context.eventName !== 'pull_request') {
       core.warning('auto-approve is disabled outside same-repo pull_request events (e.g. pull_request_target): the fork diff is untrusted and could steer the verdict via prompt injection. Posting a COMMENT instead.');
@@ -39945,7 +39963,19 @@ async function run() {
       } catch (e) {
         core.warning(`createReview failed (event=${plan.event}): ${e.message}`);
         if (plan.event === 'APPROVE') {
-          core.warning('APPROVE not permitted by this token; the summary remains in the sticky comment. See the README "Enabling Auto-Approve" section.');
+          core.warning('APPROVE not permitted by this token; the verdict is still visible in the summary. See the README "Enabling Auto-Approve" section.');
+        }
+        const fallback = planReviewFallback(plan, updateSummaryComment);
+        if (fallback) {
+          try {
+            await octokit.rest.pulls.createReview({
+              owner, repo, pull_number: prNumber,
+              commit_id: commitSha, body: fallback.body, event: fallback.event
+            });
+            core.info('Fell back to a COMMENT review so the summary is not lost.');
+          } catch (e2) {
+            core.warning(`COMMENT fallback also failed: ${e2.message}`);
+          }
         }
       }
     }
@@ -39957,7 +39987,7 @@ async function run() {
     if (createCheckRun) {
       await createCheckRunSafely({
         octokit, owner, repo, commitSha, review, severityCounts,
-        reviewComments, usage, cost, model, aiProvider, truncated
+        reviewComments, usage, cost, model, aiProvider, truncated, responseTruncated
       });
     }
 
@@ -40109,18 +40139,34 @@ async function getAIReview(opts) {
   const userPrompt = buildUserPrompt(changedFiles, diff, prAuthor);
 
   const callers = {
-    'azure-responses': () => callAzureResponsesAPI(systemPrompt, userPrompt, model, maxTokens),
-    'azure': () => callAzureOpenAI(systemPrompt, userPrompt, model, maxTokens),
-    'anthropic': () => callAnthropic(systemPrompt, userPrompt, model, maxTokens),
-    'gemini': () => callGemini(systemPrompt, userPrompt, model, maxTokens),
-    'ollama': () => callOllama(systemPrompt, userPrompt, model, maxTokens),
-    'openai': () => callOpenAI(systemPrompt, userPrompt, model, maxTokens),
+    'azure-responses': (t) => callAzureResponsesAPI(systemPrompt, userPrompt, model, t),
+    'azure': (t) => callAzureOpenAI(systemPrompt, userPrompt, model, t),
+    'anthropic': (t) => callAnthropic(systemPrompt, userPrompt, model, t),
+    'gemini': (t) => callGemini(systemPrompt, userPrompt, model, t),
+    'ollama': (t) => callOllama(systemPrompt, userPrompt, model, t),
+    'openai': (t) => callOpenAI(systemPrompt, userPrompt, model, t),
   };
   const caller = callers[provider] || callers.openai;
-  const result = await withRetry(caller, `provider=${provider}`);
+  const totalUsage = { input: 0, output: 0 };
+  const addUsage = (u) => { totalUsage.input += u?.input || 0; totalUsage.output += u?.output || 0; };
+
+  let result = await withRetry(() => caller(maxTokens), `provider=${provider}`);
+  addUsage(result.usage);
+  if (result.truncated) {
+    // A cut-off JSON response used to silently parse-fail into a false
+    // needs_changes verdict (#8). Retry once with double the budget.
+    const bumped = maxTokens * 2;
+    core.warning(`Model response hit the max-tokens limit (${maxTokens}); retrying once with ${bumped}. Consider raising max-tokens in your workflow.`);
+    result = await withRetry(() => caller(bumped), `provider=${provider} retry`);
+    addUsage(result.usage);
+    if (result.truncated) {
+      core.warning('Model response is still truncated after the retry — the review below may be incomplete.');
+    }
+  }
   return {
     review: parseReviewResponse(result.content),
-    usage: result.usage || { input: 0, output: 0 }
+    usage: totalUsage,
+    responseTruncated: !!result.truncated
   };
 }
 
@@ -40146,10 +40192,13 @@ const PRICING = {
 
 function estimateCost(model, usage) {
   if (!usage || (!usage.input && !usage.output)) return null;
-  // Match by prefix so versioned model IDs (claude-sonnet-4-5-20251001) still resolve.
+  // Match by prefix so versioned model IDs (claude-sonnet-4-5-20251001) still
+  // resolve; longest key first so gpt-4.1-mini-* can never match gpt-4 (#10).
   let entry = PRICING[model];
   if (!entry) {
-    const match = Object.keys(PRICING).find(k => model && model.startsWith(k));
+    const match = Object.keys(PRICING)
+      .sort((a, b) => b.length - a.length)
+      .find(k => model && model.startsWith(k));
     if (match) entry = PRICING[match];
   }
   if (!entry) return null;
@@ -40189,6 +40238,7 @@ async function callOpenAI(systemPrompt, userPrompt, model, maxTokens) {
   });
   return {
     content: response.choices[0].message.content,
+    truncated: response.choices[0].finish_reason === 'length',
     usage: {
       input: response.usage?.prompt_tokens || 0,
       output: response.usage?.completion_tokens || 0
@@ -40219,6 +40269,7 @@ async function callAzureOpenAI(systemPrompt, userPrompt, model, maxTokens) {
   });
   return {
     content: response.choices[0].message.content,
+    truncated: response.choices[0].finish_reason === 'length',
     usage: {
       input: response.usage?.prompt_tokens || 0,
       output: response.usage?.completion_tokens || 0
@@ -40259,6 +40310,7 @@ async function callAzureResponsesAPI(systemPrompt, userPrompt, model, maxTokens)
   if (!content) throw new Error(`Unparseable Azure Responses output: ${JSON.stringify(result).slice(0, 500)}`);
   return {
     content,
+    truncated: result.status === 'incomplete',
     usage: {
       input: result.usage?.input_tokens || result.usage?.prompt_tokens || 0,
       output: result.usage?.output_tokens || result.usage?.completion_tokens || 0
@@ -40298,6 +40350,7 @@ async function callAnthropic(systemPrompt, userPrompt, model, maxTokens) {
   // We pre-filled "{", so prepend it back when parsing.
   return {
     content: '{' + text,
+    truncated: result.stop_reason === 'max_tokens',
     usage: {
       input: result.usage?.input_tokens || 0,
       output: result.usage?.output_tokens || 0
@@ -40331,6 +40384,7 @@ async function callGemini(systemPrompt, userPrompt, model, maxTokens) {
   if (!text) throw new Error(`Empty Gemini response: ${JSON.stringify(result).slice(0, 500)}`);
   return {
     content: text,
+    truncated: result.candidates?.[0]?.finishReason === 'MAX_TOKENS',
     usage: {
       input: result.usageMetadata?.promptTokenCount || 0,
       output: result.usageMetadata?.candidatesTokenCount || 0
@@ -40363,6 +40417,7 @@ async function callOllama(systemPrompt, userPrompt, model, maxTokens) {
   const result = await response.json();
   return {
     content: result.message?.content || '',
+    truncated: result.done_reason === 'length',
     usage: {
       input: result.prompt_eval_count || 0,
       output: result.eval_count || 0
@@ -40598,27 +40653,51 @@ function parseDiffForLinePositions(diffText) {
   let currentFile = null;
   let diffPosition = 0;
   let currentNewLine = 0;
+  let inHunk = false;
+
   for (const line of diffText.split('\n')) {
-    if (line.startsWith('+++ b/')) {
-      currentFile = line.slice(6);
-      fileLineMap[currentFile] = {};
-      diffPosition = 0;
+    // Every file section starts with "diff --git". Leaving the previous file
+    // here guarantees its header lines (index, --- a/, +++ b/) can never be
+    // recorded as the previous file's trailing positions (#7).
+    if (line.startsWith('diff --git ')) {
+      currentFile = null;
+      inHunk = false;
       continue;
     }
-    if (!currentFile) continue;
+
+    if (!currentFile) {
+      // Only "+++ b/<path>" opens an addressable file. "+++ /dev/null"
+      // (deleted file) has no new side, so its hunks stay unaddressable.
+      if (line.startsWith('+++ b/')) {
+        currentFile = line.slice(6);
+        fileLineMap[currentFile] = {};
+        diffPosition = 0; // GitHub positions count per file, from its first @@
+      }
+      continue;
+    }
+
     const hunkMatch = line.match(/^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
     if (hunkMatch) {
       currentNewLine = parseInt(hunkMatch[1], 10);
       diffPosition++;
+      inHunk = true;
       continue;
     }
-    if (line.startsWith('+') && !line.startsWith('+++')) {
+    if (!inHunk) continue;
+
+    // Inside a hunk, +/- prefixes always mean content — a real next-file
+    // "+++ b/" can't appear here because "diff --git" resets inHunk first.
+    if (line.startsWith('+')) {
       fileLineMap[currentFile][currentNewLine] = diffPosition;
       currentNewLine++;
       diffPosition++;
-    } else if (line.startsWith('-') && !line.startsWith('---')) {
+    } else if (line.startsWith('-')) {
       diffPosition++;
-    } else if (!line.startsWith('\\')) {
+    } else if (line.startsWith('\\')) {
+      // "\ No newline at end of file" occupies a diff line — it counts toward
+      // position but maps to no new-side line.
+      diffPosition++;
+    } else {
       fileLineMap[currentFile][currentNewLine] = diffPosition;
       currentNewLine++;
       diffPosition++;
@@ -40646,7 +40725,7 @@ function formatSeverityBreakdown(counts, useEmoji) {
   return parts.join(' · ');
 }
 
-function buildReviewBody(review, prAuthor, previousCheckedScenarios = new Set(), reviewStyle = 'compact', useEmoji = true, truncated = false, severityCounts = null) {
+function buildReviewBody(review, prAuthor, previousCheckedScenarios = new Set(), reviewStyle = 'compact', useEmoji = true, truncated = false, severityCounts = null, responseTruncated = false) {
   const e = useEmoji ? {
     detective: '🔍', summary: '📝', tests: '🧪', qa: '🎯', questions: '❓',
     quality: '🧹', verdict: '🏁', approved: '✅', needs_changes: '⚠️',
@@ -40686,6 +40765,10 @@ function buildReviewBody(review, prAuthor, previousCheckedScenarios = new Set(),
       parts.push(`> ${e.warning} **Heads up:** PR diff was large and got truncated — this review may have missed parts of the change. Consider splitting large PRs.\n`);
     }
 
+    if (responseTruncated) {
+      parts.push(`> ${e.warning} **Heads up:** the AI response hit the \`max-tokens\` limit and was cut off — findings may be missing and the verdict may be unreliable. Raise \`max-tokens\` in your workflow.\n`);
+    }
+
     if (review.code_quality && review.code_quality !== 'null') {
       const qualityText = typeof review.code_quality === 'string'
         ? review.code_quality
@@ -40722,6 +40805,10 @@ function buildReviewBody(review, prAuthor, previousCheckedScenarios = new Set(),
 
     if (truncated) {
       parts.push(`> ${e.warning} **Heads up:** PR diff was large and got truncated — this review may have missed parts of the change.\n`);
+    }
+
+    if (responseTruncated) {
+      parts.push(`> ${e.warning} **Heads up:** the AI response hit the \`max-tokens\` limit and was cut off — findings may be missing and the verdict may be unreliable. Raise \`max-tokens\` in your workflow.\n`);
     }
 
     if (review.tests_required && review.test_suggestion) {
@@ -40831,7 +40918,7 @@ async function upsertStickyComment(octokit, owner, repo, prNumber, body) {
 
 async function createCheckRunSafely(opts) {
   const { octokit, owner, repo, commitSha, review, severityCounts,
-    usage, cost, model, aiProvider, truncated } = opts;
+    usage, cost, model, aiProvider, truncated, responseTruncated } = opts;
 
   const conclusion =
     review.verdict === 'do_not_merge' ? 'failure' :
@@ -40852,6 +40939,7 @@ async function createCheckRunSafely(opts) {
     `**Tokens:** ${usage.input} in / ${usage.output} out${cost != null ? ` · ~$${cost.toFixed(4)}` : ''}`
   ];
   if (truncated) summaryLines.push('> ⚠️ PR diff truncated — review may be incomplete.');
+  if (responseTruncated) summaryLines.push('> ⚠️ AI response hit max-tokens — review may be incomplete.');
   if (review.summary) summaryLines.push('', review.summary);
   if (review.verdict_reason) summaryLines.push('', `> ${review.verdict_reason}`);
 
@@ -40898,12 +40986,16 @@ function isScenarioPreviouslyChecked(scenario, previousCheckedScenarios) {
   for (const checked of previousCheckedScenarios) {
     const normalizedChecked = normalize(checked);
     if (normalizedScenario === normalizedChecked) return true;
-    if (normalizedScenario.includes(normalizedChecked) || normalizedChecked.includes(normalizedScenario)) return true;
-    const scenarioWords = new Set(normalizedScenario.split(/\s+/));
-    const checkedWords = new Set(normalizedChecked.split(/\s+/));
+    // Fuzzy carryover only for near-identical scenarios: ≥90% of the smaller
+    // word set shared AND at least 4 words in common. A one-word action change
+    // ("upload" → "delete") must NOT inherit the checkmark (#11), so the old
+    // bare-substring rule and 0.7 threshold are gone. False negatives are the
+    // safe direction — worst case QA re-tests a scenario.
+    const scenarioWords = new Set(normalizedScenario.split(/\s+/).filter(Boolean));
+    const checkedWords = new Set(normalizedChecked.split(/\s+/).filter(Boolean));
     const intersection = [...scenarioWords].filter(w => checkedWords.has(w));
     const minSize = Math.min(scenarioWords.size, checkedWords.size);
-    if (minSize > 0 && intersection.length / minSize >= 0.7) return true;
+    if (minSize > 0 && intersection.length >= 4 && intersection.length / minSize >= 0.9) return true;
   }
   return false;
 }
@@ -40915,9 +41007,11 @@ if (__nccwpck_require__.c[__nccwpck_require__.s] === module) {
 }
 
 module.exports = {
+  makeInputResolver,
   normalizeSeverity,
   resolveReviewEvent,
   planFormalReview,
+  planReviewFallback,
   parseReviewResponse,
   parseDiffForLinePositions,
   countSeverity,
@@ -40928,6 +41022,9 @@ module.exports = {
   isSherlockReview,
   buildSystemPrompt,
   buildUserPrompt,
+  buildReviewBody,
+  callAnthropic,
+  callOllama,
 };
 
 

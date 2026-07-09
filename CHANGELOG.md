@@ -7,6 +7,14 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) an
 
 ## [Unreleased]
 
+### Fixed
+- **Phantom inline-comment positions in multi-file diffs** ([#7](https://github.com/mayurrawte/SherlockQA/issues/7)) — the next file's diff headers were recorded as the previous file's trailing positions; deleted files and `\ No newline` markers are now handled correctly.
+- **`max-tokens` truncation no longer silently flags a clean PR** ([#8](https://github.com/mayurrawte/SherlockQA/issues/8)) — providers report when output was cut off; the action retries once with a doubled budget and surfaces a clear note in the review and Check Run.
+- **`.sherlockqa.yml` now actually works** ([#9](https://github.com/mayurrawte/SherlockQA/issues/9)) — `action.yml` defaults were pre-filling every input, making the repo-config fallback unreachable; defaults moved into code. Action inputs still win. (Edge: explicitly setting `ignore-patterns: ''` now falls back to the default ignore list.)
+- **`cost-usd` no longer 40–75× wrong for versioned model IDs** ([#10](https://github.com/mayurrawte/SherlockQA/issues/10)) — pricing lookup now matches the longest (most specific) prefix.
+- **New QA scenarios are no longer pre-checked** ([#11](https://github.com/mayurrawte/SherlockQA/issues/11)) — the carryover matcher requires near-identical scenarios instead of a loose 70% word overlap or bare substring.
+- **A failed formal review no longer loses the summary** ([#6](https://github.com/mayurrawte/SherlockQA/issues/6)) — with the sticky comment disabled, a failed `APPROVE`/`REQUEST_CHANGES` degrades to a `COMMENT` review; the README now describes the real fallback behavior.
+
 ### Planned
 - `@sherlock` mention-to-respond on review threads
 - `/sherlock` slash commands (`review-again`, `explain`, `ignore`, `approve`)
