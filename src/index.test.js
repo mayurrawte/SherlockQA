@@ -416,6 +416,7 @@ describe('action.yml (#9 — defaults must not pre-fill INPUT_* for overridable 
     const fs = require('fs');
     const action = yaml.load(fs.readFileSync(`${__dirname}/../action.yml`, 'utf8'));
     const overridable = ['ai-provider', 'mode', 'min-severity', 'ignore-patterns',
+      'max-comments', 'min-confidence',
       'max-tokens', 'auto-approve', 'code-quality', 'review-style', 'use-emoji',
       'personality', 'review-strictness', 'update-summary-comment', 'create-check-run'];
     for (const key of overridable) {
