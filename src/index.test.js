@@ -1,5 +1,7 @@
 const {
   normalizeSeverity,
+  normalizeConfidence,
+  filterAndRouteComments,
   resolveReviewEvent,
   planFormalReview,
   planReviewFallback,
@@ -36,6 +38,84 @@ describe('normalizeSeverity (#3 — severity crash + filter bypass)', () => {
     for (const s of ['critical', 'info', 'nit', 'minor', 'high', '']) {
       expect(normalizeSeverity(s)).toBe('suggestion');
     }
+  });
+});
+
+describe('normalizeConfidence', () => {
+  test('valid numbers pass through', () => {
+    expect(normalizeConfidence(0.9)).toBe(0.9);
+    expect(normalizeConfidence(0)).toBe(0);
+    expect(normalizeConfidence(1)).toBe(1);
+  });
+  test('missing/invalid defaults to 0.5 (old-format responses keep working)', () => {
+    expect(normalizeConfidence(undefined)).toBe(0.5);
+    expect(normalizeConfidence(null)).toBe(0.5);
+    expect(normalizeConfidence('high')).toBe(0.5);
+    expect(normalizeConfidence(NaN)).toBe(0.5);
+  });
+  test('numeric strings coerce; out-of-range clamps', () => {
+    expect(normalizeConfidence('0.8')).toBe(0.8);
+    expect(normalizeConfidence(1.7)).toBe(1);
+    expect(normalizeConfidence(-2)).toBe(0);
+  });
+});
+
+describe('filterAndRouteComments (noise budget + nit routing)', () => {
+  const c = (severity, confidence, file = 'a.js', line = 1) =>
+    ({ file, line, severity, confidence, comment: `${severity}@${confidence}` });
+  const opts = { minConfidence: 0.6, minSeverity: 'warning', maxComments: 5 };
+
+  test('drops findings below min-confidence', () => {
+    const { inline, minorNotes } = filterAndRouteComments(
+      [c('error', 0.9), c('error', 0.3)], opts);
+    expect(inline).toHaveLength(1);
+    expect(minorNotes).toHaveLength(0);
+  });
+
+  test('missing confidence defaults to 0.5 → dropped at the 0.6 default threshold', () => {
+    const { inline } = filterAndRouteComments([{ file: 'a.js', line: 1, severity: 'error', comment: 'x' }], opts);
+    expect(inline).toHaveLength(0);
+  });
+
+  test('suggestion severity routes to minorNotes, never inline', () => {
+    const { inline, minorNotes } = filterAndRouteComments(
+      [c('suggestion', 0.9), c('warning', 0.9)],
+      { ...opts, minSeverity: 'suggestion' });
+    expect(inline.map(x => x.severity)).toEqual(['warning']);
+    expect(minorNotes.map(x => x.severity)).toEqual(['suggestion']);
+  });
+
+  test('min-severity still drops findings entirely (suggestion below warning floor)', () => {
+    const { inline, minorNotes } = filterAndRouteComments([c('suggestion', 0.9)], opts);
+    expect(inline).toHaveLength(0);
+    expect(minorNotes).toHaveLength(0);
+  });
+
+  test('caps inline at maxComments ranked severity desc then confidence desc; overflow → minorNotes', () => {
+    const comments = [
+      c('warning', 0.7), c('error', 0.65), c('warning', 0.95),
+      c('error', 0.99), c('warning', 0.8)
+    ];
+    const { inline, minorNotes } = filterAndRouteComments(comments, { ...opts, maxComments: 3 });
+    expect(inline.map(x => x.comment)).toEqual(['error@0.99', 'error@0.65', 'warning@0.95']);
+    expect(minorNotes.map(x => x.comment)).toEqual(['warning@0.8', 'warning@0.7']);
+  });
+
+  test('maxComments 0 = unlimited', () => {
+    const many = Array.from({ length: 12 }, (_, i) => c('error', 0.9, 'a.js', i + 1));
+    const { inline } = filterAndRouteComments(many, { ...opts, maxComments: 0 });
+    expect(inline).toHaveLength(12);
+  });
+
+  test('normalizes severity and confidence on the way through', () => {
+    const { inline } = filterAndRouteComments(
+      [{ file: 'a.js', line: 1, severity: 'ERROR', confidence: '0.9', comment: 'x' }], opts);
+    expect(inline[0].severity).toBe('error');
+    expect(inline[0].confidence).toBe(0.9);
+  });
+
+  test('empty/undefined input returns empty routing', () => {
+    expect(filterAndRouteComments(undefined, opts)).toEqual({ inline: [], minorNotes: [] });
   });
 });
 

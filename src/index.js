@@ -18,7 +18,39 @@ const COMMENT_MARKER = '<!-- sherlockqa:comment -->';
 // values (e.g. 'critical', 'info', 'nit', undefined) collapse to 'suggestion'
 // so they can never bypass the min-severity filter or crash on .toUpperCase().
 function normalizeSeverity(sev) {
-  return SEVERITY_LEVEL[sev] ? sev : 'suggestion';
+  const lower = String(sev || '').toLowerCase();
+  return SEVERITY_LEVEL[lower] ? lower : 'suggestion';
+}
+
+// Model-supplied confidence (0-1) for a finding. Missing or unparseable values
+// collapse to 0.5 so old-format responses and weaker models neither crash nor
+// sail past the min-confidence filter with implicit certainty.
+function normalizeConfidence(value) {
+  const n = Number(value);
+  if (value === null || value === undefined || value === '' || Number.isNaN(n)) return 0.5;
+  return Math.min(1, Math.max(0, n));
+}
+
+// Noise budget: drop low-confidence and below-min-severity findings, route
+// suggestion-severity findings to a consolidated "minor notes" block instead
+// of inline comments, and cap inline comments at maxComments (0 = unlimited),
+// ranked by severity then confidence. Overflow joins the minor notes.
+function filterAndRouteComments(comments, { minConfidence, minSeverity, maxComments }) {
+  const minLevel = SEVERITY_LEVEL[minSeverity] || 1;
+  const surviving = (comments || [])
+    .map(c => ({ ...c, severity: normalizeSeverity(c.severity), confidence: normalizeConfidence(c.confidence) }))
+    .filter(c => c.confidence >= minConfidence)
+    .filter(c => SEVERITY_LEVEL[c.severity] >= minLevel);
+
+  const minorNotes = surviving.filter(c => c.severity === 'suggestion');
+  const inline = surviving
+    .filter(c => c.severity !== 'suggestion')
+    .sort((a, b) => (SEVERITY_LEVEL[b.severity] - SEVERITY_LEVEL[a.severity]) || (b.confidence - a.confidence));
+
+  if (maxComments > 0 && inline.length > maxComments) {
+    minorNotes.push(...inline.splice(maxComments));
+  }
+  return { inline, minorNotes };
 }
 
 // Decide which review event to submit. Auto-APPROVE is only ever allowed on
@@ -1251,6 +1283,8 @@ if (require.main === module) {
 module.exports = {
   makeInputResolver,
   normalizeSeverity,
+  normalizeConfidence,
+  filterAndRouteComments,
   resolveReviewEvent,
   planFormalReview,
   planReviewFallback,
