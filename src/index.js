@@ -38,9 +38,17 @@ function normalizeConfidence(value) {
 function filterAndRouteComments(comments, { minConfidence, minSeverity, maxComments }) {
   const minLevel = SEVERITY_LEVEL[minSeverity] || 1;
   const surviving = (comments || [])
-    .map(c => ({ ...c, severity: normalizeSeverity(c.severity), confidence: normalizeConfidence(c.confidence) }))
-    .filter(c => c.confidence >= minConfidence)
-    .filter(c => SEVERITY_LEVEL[c.severity] >= minLevel);
+    .map(c => {
+      const hasConfidence = !(c.confidence === undefined || c.confidence === null || c.confidence === '' || Number.isNaN(Number(c.confidence)));
+      return { ...c, severity: normalizeSeverity(c.severity), confidence: normalizeConfidence(c.confidence), hasConfidence };
+    })
+    // Missing/invalid confidence bypasses the min-confidence filter (backward
+    // compat: models that don't emit the field must not have every finding
+    // dropped) — it still ranks at 0.5 via normalizeConfidence above.
+    .filter(c => !c.hasConfidence || c.confidence >= minConfidence)
+    .filter(c => SEVERITY_LEVEL[c.severity] >= minLevel)
+    // eslint-disable-next-line no-unused-vars
+    .map(({ hasConfidence, ...rest }) => rest);
 
   const minorNotes = surviving.filter(c => c.severity === 'suggestion');
   const inline = surviving
@@ -121,8 +129,16 @@ async function run() {
     const aiProvider = getInput('ai-provider') || 'openai';
     const model = getInput('model') || defaultModelFor(aiProvider);
     const minSeverity = getInput('min-severity') || 'warning';
-    const maxComments = parseInt(getInput('max-comments') || '5', 10);
-    const minConfidence = parseFloat(getInput('min-confidence') || '0.6');
+    let maxComments = parseInt(getInput('max-comments') || '5', 10);
+    if (Number.isNaN(maxComments) || maxComments < 0) {
+      core.warning('Invalid max-comments input; falling back to default (5).');
+      maxComments = 5;
+    }
+    let minConfidence = parseFloat(getInput('min-confidence') || '0.6');
+    if (Number.isNaN(minConfidence) || minConfidence < 0 || minConfidence > 1) {
+      core.warning('Invalid min-confidence input; falling back to default (0.6).');
+      minConfidence = 0.6;
+    }
     const ignorePatterns = (getInput('ignore-patterns') || '*.md,*.txt,package-lock.json,yarn.lock')
       .split(',').map(p => p.trim()).filter(Boolean);
     const persona = getInput('persona') || '';
@@ -189,10 +205,15 @@ async function run() {
     core.info(`Verdict: ${review.verdict} · ${review.line_comments?.length || 0} issues · ${usage.input}+${usage.output} tokens${costStr}`);
 
     // Noise budget: confidence filter + severity floor + suggestion routing + cap.
+    const rawFindingsCount = (review.line_comments || []).length;
     const routed = filterAndRouteComments(review.line_comments || [], {
       minConfidence, minSeverity, maxComments
     });
     review.line_comments = routed.inline; // downstream counts/annotations = what we post
+
+    if (rawFindingsCount > 0 && routed.inline.length === 0 && routed.minorNotes.length === 0 && review.verdict !== 'approved') {
+      core.warning(`All ${rawFindingsCount} findings were filtered out (confidence/severity thresholds) but the verdict is ${review.verdict} — the summary may lack supporting detail.`);
+    }
 
     const linePositionMap = parseDiffForLinePositions(diff);
     const reviewComments = [];
@@ -209,7 +230,7 @@ async function run() {
       }
     }
 
-    const severityCounts = countSeverity(routed.inline.concat(routed.minorNotes));
+    const severityCounts = countSeverity(routed.inline);
     const body = buildReviewBody(review, prAuthor, previousCheckedScenarios, reviewStyle, useEmoji, truncated, severityCounts, responseTruncated, routed.minorNotes);
 
     if (autoApprove && review.verdict === 'approved' && context.eventName !== 'pull_request') {
@@ -1007,6 +1028,26 @@ function formatSeverityBreakdown(counts, useEmoji) {
   return parts.join(' · ');
 }
 
+// Renders the collapsed "Minor notes" block. Entries are usually suggestion-
+// severity nits ("no action required"), but overflow from the max-comments
+// cap can push error/warning findings in here too (I4) — those must not be
+// mislabeled as harmless, so the header drops the "no action required" claim
+// and each entry carries its real severity emoji.
+function formatMinorNotesBlock(minorNotes, e) {
+  const hasOverBudget = minorNotes.some(n => normalizeSeverity(n.severity) !== 'suggestion');
+  const headerSuffix = hasOverBudget
+    ? ` — includes ${minorNotes.filter(n => normalizeSeverity(n.severity) !== 'suggestion').length} over-budget findings`
+    : ' — low-severity, no action required';
+  const lines = ['<details>'];
+  lines.push(`<summary>${e.quality} <b>Minor notes (${minorNotes.length})</b>${headerSuffix}</summary>\n`);
+  minorNotes.forEach(n => {
+    const emoji = SEVERITY_EMOJI[normalizeSeverity(n.severity)] || '🔵';
+    lines.push(`- ${emoji} \`${n.file}:${n.line}\` — ${n.comment}`);
+  });
+  lines.push('\n</details>\n');
+  return lines;
+}
+
 function buildReviewBody(review, prAuthor, previousCheckedScenarios = new Set(), reviewStyle = 'compact', useEmoji = true, truncated = false, severityCounts = null, responseTruncated = false, minorNotes = []) {
   const e = useEmoji ? {
     detective: '🔍', summary: '📝', tests: '🧪', qa: '🎯', questions: '❓',
@@ -1027,14 +1068,18 @@ function buildReviewBody(review, prAuthor, previousCheckedScenarios = new Set(),
   const severityStr = severityCounts && issueCount > 0
     ? ` (${formatSeverityBreakdown(severityCounts, useEmoji)})`
     : '';
+  const minorNotesStr = minorNotes.length > 0 ? ` · +${minorNotes.length} minor note${minorNotes.length === 1 ? '' : 's'}` : '';
 
   const parts = [];
 
   if (reviewStyle === 'compact') {
     const isApproved = review.verdict === 'approved';
     const isCleanApproval = isApproved && issueCount === 0 && questionCount === 0 && minorNotes.length === 0;
+    // QA is suppressed on approvals below (M7) — don't advertise a count for a
+    // section that never renders in this style.
+    const qaStr = isApproved ? '' : ` · ${qaCount} QA scenarios`;
     parts.push(`## ${e.detective} SherlockQA's Review\n`);
-    parts.push(`**Verdict:** ${verdictEmoji[review.verdict] || e.needs_changes} ${verdictText[review.verdict] || review.verdict} | ${issueCount} issues${severityStr} · ${qaCount} QA scenarios${questionCount > 0 ? ` · ${questionCount} questions` : ''}\n`);
+    parts.push(`**Verdict:** ${verdictEmoji[review.verdict] || e.needs_changes} ${verdictText[review.verdict] || review.verdict} | ${issueCount} issues${severityStr}${minorNotesStr}${qaStr}${questionCount > 0 ? ` · ${questionCount} questions` : ''}\n`);
     if (review.verdict_reason) parts.push(`> ${review.verdict_reason}\n`);
 
     if (truncated) {
@@ -1081,12 +1126,7 @@ function buildReviewBody(review, prAuthor, previousCheckedScenarios = new Set(),
     }
 
     if (minorNotes.length > 0) {
-      parts.push('<details>');
-      parts.push(`<summary>${e.quality} <b>Minor notes (${minorNotes.length})</b> — low-severity, no action required</summary>\n`);
-      minorNotes.forEach(n => {
-        parts.push(`- \`${n.file}:${n.line}\` — ${n.comment}`);
-      });
-      parts.push('\n</details>\n');
+      parts.push(...formatMinorNotesBlock(minorNotes, e));
     }
   } else {
     parts.push(`## ${e.detective} SherlockQA's Review\n`);
@@ -1106,7 +1146,7 @@ function buildReviewBody(review, prAuthor, previousCheckedScenarios = new Set(),
       parts.push(`${review.test_suggestion}\n`);
     }
 
-    if (review.verdict !== 'approved' && review.qa_scenarios?.length > 0) {
+    if (review.qa_scenarios?.length > 0) {
       parts.push(`### ${e.qa} QA Test Scenarios`);
       review.qa_scenarios.forEach(scenario => {
         const isChecked = isScenarioPreviouslyChecked(scenario, previousCheckedScenarios);
@@ -1116,7 +1156,7 @@ function buildReviewBody(review, prAuthor, previousCheckedScenarios = new Set(),
       parts.push('');
     }
 
-    if (review.verdict !== 'approved' && review.questions?.length > 0) {
+    if (review.questions?.length > 0) {
       parts.push(`### ${e.questions} Questions`);
       review.questions.forEach(q => parts.push(`- ${q}`));
       parts.push('');
@@ -1136,16 +1176,11 @@ function buildReviewBody(review, prAuthor, previousCheckedScenarios = new Set(),
       }
     }
 
-    parts.push(`### ${e.verdict} Verdict\n${verdictEmoji[review.verdict] || e.needs_changes} ${verdictText[review.verdict] || review.verdict}`);
+    parts.push(`### ${e.verdict} Verdict\n${verdictEmoji[review.verdict] || e.needs_changes} ${verdictText[review.verdict] || review.verdict}${minorNotesStr}`);
     if (review.verdict_reason) parts.push(`\n> ${review.verdict_reason}`);
 
     if (minorNotes.length > 0) {
-      parts.push('<details>');
-      parts.push(`<summary>${e.quality} <b>Minor notes (${minorNotes.length})</b> — low-severity, no action required</summary>\n`);
-      minorNotes.forEach(n => {
-        parts.push(`- \`${n.file}:${n.line}\` — ${n.comment}`);
-      });
-      parts.push('\n</details>\n');
+      parts.push(...formatMinorNotesBlock(minorNotes, e));
     }
   }
 

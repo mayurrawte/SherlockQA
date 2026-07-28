@@ -26,12 +26,12 @@ Both overridable via `.sherlockqa.yml` like existing review config.
 
 ## Schema change
 
-`line_comments[]` gains `"confidence": 0.0-1.0` (model's certainty the finding is real and matters). `normalizeSeverity`-style guard: missing/invalid confidence defaults to `0.5` so old-format responses and weaker models keep working.
+`line_comments[]` gains `"confidence": 0.0-1.0` (model's certainty the finding is real and matters). `normalizeSeverity`-style guard: missing/invalid confidence defaults to `0.5` so old-format responses and weaker models keep working. Findings that don't carry a confidence value at all **bypass the min-confidence filter** (backward compatibility — a model that never emits the field must not have every finding dropped) while still ranking at `0.5` for the severity/confidence sort. Only an explicit, out-of-range-or-parseable confidence value is subject to the `min-confidence` filter.
 
 ## Pipeline (post-parse, in order)
 
 1. Normalize severity + confidence.
-2. Drop findings with `confidence < min-confidence`.
+2. Drop findings with an explicit `confidence < min-confidence`. Findings without a confidence value at all bypass this filter (backward compatibility) and rank as `0.5`.
 3. Apply existing `min-severity` filter.
 4. Split: `error`/`warning` → inline candidates; `suggestion` → "Minor notes".
 5. Cap inline candidates at `max-comments`, ranked by severity level desc, then confidence desc. Overflow moves to "Minor notes".
