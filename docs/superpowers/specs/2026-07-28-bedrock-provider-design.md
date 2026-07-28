@@ -44,7 +44,7 @@ Request body:
 
 Response mapping (normalized to the shape the other `call*` functions return):
 
-- text: all text blocks of output.message.content joined
+- text: all text blocks of `output.message.content` joined
 - usage: `{ input: usage.inputTokens, output: usage.outputTokens }`
 - response truncation: `stopReason === "max_tokens"`
 

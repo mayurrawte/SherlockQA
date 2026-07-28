@@ -95,7 +95,7 @@ jobs:
 | `update-summary-comment` | Maintain a single sticky issue-comment with the current summary | No | `true` |
 | `create-check-run` | Create a Check Run so verdict appears in the PR Checks column (needs `checks: write`) | No | `true` |
 
-*One of `openai-api-key`, `anthropic-api-key`, `gemini-api-key`, or `azure-api-key` is required, matching the provider.
+*One of `openai-api-key`, `anthropic-api-key`, `gemini-api-key`, `azure-api-key`, or `bedrock-api-key` is required, matching the provider.
 
 ### Default Models
 
