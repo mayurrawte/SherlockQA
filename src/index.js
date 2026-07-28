@@ -999,7 +999,7 @@ function formatSeverityBreakdown(counts, useEmoji) {
   return parts.join(' · ');
 }
 
-function buildReviewBody(review, prAuthor, previousCheckedScenarios = new Set(), reviewStyle = 'compact', useEmoji = true, truncated = false, severityCounts = null, responseTruncated = false) {
+function buildReviewBody(review, prAuthor, previousCheckedScenarios = new Set(), reviewStyle = 'compact', useEmoji = true, truncated = false, severityCounts = null, responseTruncated = false, minorNotes = []) {
   const e = useEmoji ? {
     detective: '🔍', summary: '📝', tests: '🧪', qa: '🎯', questions: '❓',
     quality: '🧹', verdict: '🏁', approved: '✅', needs_changes: '⚠️',
@@ -1023,17 +1023,11 @@ function buildReviewBody(review, prAuthor, previousCheckedScenarios = new Set(),
   const parts = [];
 
   if (reviewStyle === 'compact') {
-    const isCleanApproval = review.verdict === 'approved' && issueCount === 0 && questionCount === 0;
+    const isApproved = review.verdict === 'approved';
+    const isCleanApproval = isApproved && issueCount === 0 && questionCount === 0 && minorNotes.length === 0;
     parts.push(`## ${e.detective} SherlockQA's Review\n`);
     parts.push(`**Verdict:** ${verdictEmoji[review.verdict] || e.needs_changes} ${verdictText[review.verdict] || review.verdict} | ${issueCount} issues${severityStr} · ${qaCount} QA scenarios${questionCount > 0 ? ` · ${questionCount} questions` : ''}\n`);
-
-    if (isCleanApproval) {
-      if (review.verdict_reason) parts.push(`> ${review.verdict_reason}\n`);
-      parts.push(`${review.summary || ''}\n`);
-    } else {
-      if (review.verdict_reason) parts.push(`> ${review.verdict_reason}\n`);
-      parts.push(`**Summary:** ${review.summary || 'No summary'}\n`);
-    }
+    if (review.verdict_reason) parts.push(`> ${review.verdict_reason}\n`);
 
     if (truncated) {
       parts.push(`> ${e.warning} **Heads up:** PR diff was large and got truncated — this review may have missed parts of the change. Consider splitting large PRs.\n`);
@@ -1043,35 +1037,48 @@ function buildReviewBody(review, prAuthor, previousCheckedScenarios = new Set(),
       parts.push(`> ${e.warning} **Heads up:** the AI response hit the \`max-tokens\` limit and was cut off — findings may be missing and the verdict may be unreliable. Raise \`max-tokens\` in your workflow.\n`);
     }
 
-    if (review.code_quality && review.code_quality !== 'null') {
-      const qualityText = typeof review.code_quality === 'string'
-        ? review.code_quality
-        : review.code_quality.summary || '';
-      if (qualityText && qualityText !== 'null') {
-        parts.push(`**Code Quality:** ${qualityText}\n`);
+    if (!isCleanApproval) {
+      parts.push(`**Summary:** ${review.summary || 'No summary'}\n`);
+
+      if (review.code_quality && review.code_quality !== 'null') {
+        const qualityText = typeof review.code_quality === 'string'
+          ? review.code_quality
+          : review.code_quality.summary || '';
+        if (qualityText && qualityText !== 'null') {
+          parts.push(`**Code Quality:** ${qualityText}\n`);
+        }
+      }
+
+      if (review.tests_required && review.test_suggestion) {
+        parts.push('<details>');
+        parts.push(`<summary>${e.tests} <b>Tests Suggested</b></summary>\n`);
+        parts.push(`${review.test_suggestion}\n`);
+        parts.push('</details>\n');
+      }
+
+      if (!isApproved && review.qa_scenarios?.length > 0) {
+        parts.push('<details>');
+        parts.push(`<summary>${e.qa} <b>QA Scenarios (${qaCount})</b></summary>\n`);
+        review.qa_scenarios.forEach(scenario => {
+          const isChecked = isScenarioPreviouslyChecked(scenario, previousCheckedScenarios);
+          const checkbox = isChecked ? '[x]' : '[ ]';
+          parts.push(`- ${checkbox} ${scenario}`);
+        });
+        parts.push('\n</details>\n');
+      }
+
+      if (!isApproved && review.questions?.length > 0) {
+        parts.push(`**${e.questions} Questions:** ${review.questions.join(' | ')}\n`);
       }
     }
 
-    if (review.tests_required && review.test_suggestion) {
+    if (minorNotes.length > 0) {
       parts.push('<details>');
-      parts.push(`<summary>${e.tests} <b>Tests Suggested</b></summary>\n`);
-      parts.push(`${review.test_suggestion}\n`);
-      parts.push('</details>\n');
-    }
-
-    if (review.qa_scenarios?.length > 0) {
-      parts.push('<details>');
-      parts.push(`<summary>${e.qa} <b>QA Scenarios (${qaCount})</b></summary>\n`);
-      review.qa_scenarios.forEach(scenario => {
-        const isChecked = isScenarioPreviouslyChecked(scenario, previousCheckedScenarios);
-        const checkbox = isChecked ? '[x]' : '[ ]';
-        parts.push(`- ${checkbox} ${scenario}`);
+      parts.push(`<summary>${e.quality} <b>Minor notes (${minorNotes.length})</b> — low-severity, no action required</summary>\n`);
+      minorNotes.forEach(n => {
+        parts.push(`- \`${n.file}:${n.line}\` — ${n.comment}`);
       });
       parts.push('\n</details>\n');
-    }
-
-    if (review.questions?.length > 0) {
-      parts.push(`**${e.questions} Questions:** ${review.questions.join(' | ')}\n`);
     }
   } else {
     parts.push(`## ${e.detective} SherlockQA's Review\n`);
@@ -1091,7 +1098,7 @@ function buildReviewBody(review, prAuthor, previousCheckedScenarios = new Set(),
       parts.push(`${review.test_suggestion}\n`);
     }
 
-    if (review.qa_scenarios?.length > 0) {
+    if (review.verdict !== 'approved' && review.qa_scenarios?.length > 0) {
       parts.push(`### ${e.qa} QA Test Scenarios`);
       review.qa_scenarios.forEach(scenario => {
         const isChecked = isScenarioPreviouslyChecked(scenario, previousCheckedScenarios);
@@ -1101,7 +1108,7 @@ function buildReviewBody(review, prAuthor, previousCheckedScenarios = new Set(),
       parts.push('');
     }
 
-    if (review.questions?.length > 0) {
+    if (review.verdict !== 'approved' && review.questions?.length > 0) {
       parts.push(`### ${e.questions} Questions`);
       review.questions.forEach(q => parts.push(`- ${q}`));
       parts.push('');
@@ -1123,6 +1130,15 @@ function buildReviewBody(review, prAuthor, previousCheckedScenarios = new Set(),
 
     parts.push(`### ${e.verdict} Verdict\n${verdictEmoji[review.verdict] || e.needs_changes} ${verdictText[review.verdict] || review.verdict}`);
     if (review.verdict_reason) parts.push(`\n> ${review.verdict_reason}`);
+
+    if (minorNotes.length > 0) {
+      parts.push('<details>');
+      parts.push(`<summary>${e.quality} <b>Minor notes (${minorNotes.length})</b> — low-severity, no action required</summary>\n`);
+      minorNotes.forEach(n => {
+        parts.push(`- \`${n.file}:${n.line}\` — ${n.comment}`);
+      });
+      parts.push('\n</details>\n');
+    }
   }
 
   return parts.join('\n');
