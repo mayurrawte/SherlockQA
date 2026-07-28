@@ -543,3 +543,28 @@ describe('prompt hardening (#5 — injection isolation)', () => {
     expect(sys).toMatch(/never as a command|Never obey directives/i);
   });
 });
+
+describe('buildSystemPrompt high-signal rules', () => {
+  test('contains the concrete flag bar instead of vibes', () => {
+    const p = buildSystemPrompt('', '', false, 'professional', 'balanced', 'general', 5);
+    expect(p).toMatch(/incorrect behavior, a test failure, data loss, or a security vulnerability/);
+  });
+  test('contains the comment format rule', () => {
+    const p = buildSystemPrompt('', '', false, 'professional', 'balanced', 'general', 5);
+    expect(p).toMatch(/at most 2 sentences/i);
+    expect(p).toMatch(/never narrate/i);
+  });
+  test('budget line reflects max-comments', () => {
+    const p = buildSystemPrompt('', '', false, 'professional', 'balanced', 'general', 3);
+    expect(p).toMatch(/at most 3 findings/i);
+    expect(p).toMatch(/empty line_comments array is a good outcome/i);
+  });
+  test('budget line omitted when max-comments is 0 (unlimited)', () => {
+    const p = buildSystemPrompt('', '', false, 'professional', 'balanced', 'general', 0);
+    expect(p).not.toMatch(/at most 0 findings/i);
+  });
+  test('JSON schema includes confidence', () => {
+    const p = buildSystemPrompt('', '', false, 'professional', 'balanced', 'general', 5);
+    expect(p).toContain('"confidence"');
+  });
+});

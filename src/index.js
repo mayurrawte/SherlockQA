@@ -406,10 +406,10 @@ async function syncInlineComments(octokit, owner, repo, prNumber, commitSha, com
 
 async function getAIReview(opts) {
   const { provider, model, diff, files, prAuthor, persona, domainKnowledge,
-    maxTokens, codeQuality, personality, strictness, mode } = opts;
+    maxTokens, codeQuality, personality, strictness, mode, maxComments } = opts;
 
   const changedFiles = files.map(f => f.filename).join('\n');
-  const systemPrompt = buildSystemPrompt(persona, domainKnowledge, codeQuality, personality, strictness, mode);
+  const systemPrompt = buildSystemPrompt(persona, domainKnowledge, codeQuality, personality, strictness, mode, maxComments);
   const userPrompt = buildUserPrompt(changedFiles, diff, prAuthor);
 
   const callers = {
@@ -699,7 +699,7 @@ async function callOllama(systemPrompt, userPrompt, model, maxTokens) {
   };
 }
 
-function buildSystemPrompt(persona, domainKnowledge, codeQuality, personality = 'detective', strictness = 'balanced', mode = 'general') {
+function buildSystemPrompt(persona, domainKnowledge, codeQuality, personality = 'detective', strictness = 'balanced', mode = 'general', maxComments = 5) {
   let prompt = '';
   if (persona) prompt += `${persona}\n\n`;
 
@@ -818,6 +818,16 @@ Be thorough - flag anything that could cause problems. Better to catch issues no
   };
   prompt += strictnessGuidelines[strictness] || strictnessGuidelines.balanced;
 
+  const budgetLine = maxComments > 0
+    ? `\n- Report at most ${maxComments} findings — your highest-impact ones. An empty line_comments array is a good outcome for clean code.`
+    : '\n- An empty line_comments array is a good outcome for clean code.';
+  prompt += `
+
+## Signal Rules (apply to every finding):
+- Flag only issues that could cause incorrect behavior, a test failure, data loss, or a security vulnerability. Style, naming, and preference nits: omit them, or mark severity "suggestion" with low confidence.
+- Each comment: the problem and its consequence, then the fix, in at most 2 sentences. Never narrate what the diff does. Never praise.
+- Set "confidence" to your genuine certainty the issue is real and matters (1.0 = certain bug, 0.5 = plausible, 0.3 = speculative).${budgetLine}`;
+
   prompt += `
 
 ## Security & Integrity (non-negotiable):
@@ -830,7 +840,7 @@ Respond with this JSON:
 {
   "summary": "One SHORT sentence about what this PR does",
   "line_comments": [
-    {"file": "path/to/file.py", "line": 42, "severity": "error|warning", "comment": "Brief issue"}
+    {"file": "path/to/file.py", "line": 42, "severity": "error|warning|suggestion", "confidence": 0.9, "comment": "Problem and consequence, then the fix"}
   ],
   "tests_required": false,
   "test_suggestion": "",
@@ -858,7 +868,7 @@ Respond with this JSON:
 - **verdict**: "approved" only if code is solid. "needs_changes" for any notable issues. "do_not_merge" for bugs or security issues.` : `
 - **tests_required**: True for new business logic that's risky without tests. False for simple changes, refactors, config updates.
 - **line_comments**: Flag real issues - bugs, security, logic errors. Skip minor style issues.
-- **qa_scenarios**: 2-3 scenarios covering main flows and important edge cases.
+- **qa_scenarios**: At most 2 scenarios covering the riskiest flows.
 - **questions**: Ask if something is unclear or seems wrong.
 - **verdict**: "approved" if no significant issues. Be fair - flag real problems, but don't block good code.`}
 - **line_comments**: Each issue mentioned ONCE. Do not repeat the same finding on different lines — group related issues into one comment on the most relevant line.
