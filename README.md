@@ -13,7 +13,7 @@
   <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT"></a>
 </p>
 
-SherlockQA is a GitHub Action that reviews your pull requests with AI — identifies bugs, security issues, and suggests QA test scenarios. Works with **OpenAI, Anthropic Claude, Google Gemini, Azure OpenAI, and local models via Ollama**. MIT-licensed, BYO API key — no data leaves your CI.
+SherlockQA is a GitHub Action that reviews your pull requests with AI — identifies bugs, security issues, and suggests QA test scenarios. Works with **OpenAI, Anthropic Claude, Google Gemini, Azure OpenAI, AWS Bedrock, and local models via Ollama**. MIT-licensed, BYO API key — no data leaves your CI.
 
 <!-- Demo GIF — replace `assets/demo.gif` with a real recording -->
 <p align="center">
@@ -22,7 +22,7 @@ SherlockQA is a GitHub Action that reviews your pull requests with AI — identi
 
 ## Features
 
-- **Multi-Provider AI** — OpenAI, Anthropic Claude, Google Gemini, Azure OpenAI, Azure Responses API, and self-hosted Ollama
+- **Multi-Provider AI** — OpenAI, Anthropic Claude, Google Gemini, Azure OpenAI, AWS Bedrock, and self-hosted Ollama
 - **Security Audit Mode** — dedicated SAST-style review focused on injections, auth flaws, secrets, crypto misuse, SSRF, XSS, and more
 - **Inline Comments** — posts comments directly on problematic lines
 - **QA Test Scenarios** — suggests manual test cases based on code changes
@@ -68,7 +68,7 @@ jobs:
 | Input | Description | Required | Default |
 |-------|-------------|----------|---------|
 | `github-token` | GitHub token for API access | Yes | `${{ github.token }}` |
-| `ai-provider` | AI provider (`openai`, `anthropic`, `gemini`, `azure`, `azure-responses`, `ollama`) | No | `openai` |
+| `ai-provider` | AI provider (`openai`, `anthropic`, `gemini`, `azure`, `azure-responses`, `ollama`, `bedrock`) | No | `openai` |
 | `openai-api-key` | OpenAI API key | Yes* | - |
 | `anthropic-api-key` | Anthropic API key | Yes* | - |
 | `gemini-api-key` | Google Gemini API key | Yes* | - |
@@ -76,6 +76,8 @@ jobs:
 | `azure-endpoint` | Azure OpenAI endpoint URL | No | - |
 | `azure-deployment` | Azure OpenAI deployment name | No | - |
 | `azure-api-version` | Azure OpenAI API version | No | `2024-02-15-preview` |
+| `bedrock-api-key` | Bedrock API key (Bearer token) | Yes* | - |
+| `aws-region` | AWS region for Bedrock endpoint | No | `us-east-1` |
 | `ollama-base-url` | Ollama server URL | No | `http://localhost:11434` |
 | `model` | Model to use (provider-specific default) | No | see below |
 | `mode` | Review mode: `general` or `security` | No | `general` |
@@ -103,6 +105,7 @@ jobs:
 | `anthropic` | `claude-sonnet-4-5` |
 | `gemini` | `gemini-2.0-flash` |
 | `ollama` | `llama3.1` |
+| `bedrock` | `anthropic.claude-sonnet-5` |
 | `azure` / `azure-responses` | `gpt-4o-mini` |
 
 ## Outputs
@@ -170,6 +173,20 @@ jobs:
     azure-api-key: ${{ secrets.AZURE_OPENAI_KEY }}
     azure-endpoint: https://your-resource.openai.azure.com
     azure-deployment: gpt-4o-mini
+```
+
+### With AWS Bedrock
+
+Uses the model-agnostic [Converse API](https://docs.aws.amazon.com/bedrock/latest/APIReference/API_runtime_Converse.html), so any Bedrock chat model works (Claude, Llama, Mistral, Nova...). Authenticate with a [Bedrock API key](https://docs.aws.amazon.com/bedrock/latest/userguide/api-keys.html) (Bearer token) — IAM-role/OIDC/SigV4 auth is not supported.
+
+```yaml
+- uses: mayurrawte/SherlockQA@v1
+  with:
+    github-token: ${{ secrets.GITHUB_TOKEN }}
+    ai-provider: bedrock
+    bedrock-api-key: ${{ secrets.BEDROCK_API_KEY }}
+    aws-region: us-east-1          # default
+    model: anthropic.claude-sonnet-5   # default; any Converse-compatible model id works
 ```
 
 ### Security Audit Mode
