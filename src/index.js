@@ -429,6 +429,8 @@ const PRICING = {
   'claude-sonnet-4':     { in: 3.00,  out: 15.00 },
   'claude-sonnet-4-5':   { in: 3.00,  out: 15.00 },
   'claude-haiku-4-5':    { in: 1.00,  out: 5.00 },
+  'claude-sonnet-5':     { in: 3.00,  out: 15.00 },
+  'claude-opus-5':       { in: 5.00,  out: 25.00 },
   'gemini-2.0-flash':    { in: 0.075, out: 0.30 },
   'gemini-2.5-flash':    { in: 0.075, out: 0.30 },
   'gemini-2.5-pro':      { in: 1.25,  out: 5.00 },
@@ -436,13 +438,17 @@ const PRICING = {
 
 function estimateCost(model, usage) {
   if (!usage || (!usage.input && !usage.output)) return null;
+  // Bedrock Claude IDs carry a provider prefix (anthropic., us.anthropic.,
+  // eu.anthropic.) — strip it so the claude-* pricing rows match. AWS-set
+  // Bedrock prices can differ from Anthropic list prices; this is an estimate.
+  const normalized = (model || '').replace(/^(us\.|eu\.)?anthropic\./, '');
   // Match by prefix so versioned model IDs (claude-sonnet-4-5-20251001) still
   // resolve; longest key first so gpt-4.1-mini-* can never match gpt-4 (#10).
-  let entry = PRICING[model];
+  let entry = PRICING[normalized];
   if (!entry) {
     const match = Object.keys(PRICING)
       .sort((a, b) => b.length - a.length)
-      .find(k => model && model.startsWith(k));
+      .find(k => normalized && normalized.startsWith(k));
     if (match) entry = PRICING[match];
   }
   if (!entry) return null;

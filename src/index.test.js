@@ -165,6 +165,7 @@ describe('isSherlockReview (#21 — emoji-independent self-detection)', () => {
 
 describe('estimateCost (#10 — versioned model IDs matched the shortest prefix)', () => {
   const M = 1_000_000;
+  const usage = { input: 1000, output: 1000 };
 
   test('versioned gpt-4.1-mini resolves to gpt-4.1-mini pricing, not gpt-4 (was 75x too high)', () => {
     expect(estimateCost('gpt-4.1-mini-2025-04-14', { input: M, output: 0 })).toBeCloseTo(0.40);
@@ -188,6 +189,20 @@ describe('estimateCost (#10 — versioned model IDs matched the shortest prefix)
     expect(estimateCost('llama3.1', { input: M, output: M })).toBeNull();
     expect(estimateCost('gpt-4o-mini', { input: 0, output: 0 })).toBeNull();
     expect(estimateCost('gpt-4o-mini', null)).toBeNull();
+  });
+
+  test('bedrock anthropic.-prefixed id resolves to the claude pricing row', () => {
+    expect(estimateCost('anthropic.claude-sonnet-5', usage))
+      .toBeCloseTo((1000 * 3.00 + 1000 * 15.00) / 1e6);
+  });
+
+  test('bedrock us. inference-profile id resolves via prefix strip + version prefix match', () => {
+    expect(estimateCost('us.anthropic.claude-haiku-4-5-20251001-v1:0', usage))
+      .toBeCloseTo((1000 * 1.00 + 1000 * 5.00) / 1e6);
+  });
+
+  test('non-claude bedrock model returns null (no pricing row)', () => {
+    expect(estimateCost('meta.llama3-1-70b-instruct-v1:0', usage)).toBeNull();
   });
 });
 
