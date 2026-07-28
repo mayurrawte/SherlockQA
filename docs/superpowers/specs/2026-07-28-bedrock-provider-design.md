@@ -1,7 +1,7 @@
 # AWS Bedrock Provider Support
 
 **Date:** 2026-07-28
-**Status:** Approved design, pending implementation
+**Status:** Implemented
 
 ## Goal
 

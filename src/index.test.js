@@ -204,6 +204,16 @@ describe('estimateCost (#10 — versioned model IDs matched the shortest prefix)
   test('non-claude bedrock model returns null (no pricing row)', () => {
     expect(estimateCost('meta.llama3-1-70b-instruct-v1:0', usage)).toBeNull();
   });
+
+  test('bedrock eu. inference-profile id resolves to the claude pricing row', () => {
+    expect(estimateCost('eu.anthropic.claude-sonnet-5', usage))
+      .toBeCloseTo((1000 * 3.00 + 1000 * 15.00) / 1e6);
+  });
+
+  test('bedrock apac. inference-profile id resolves via prefix strip + version prefix match', () => {
+    expect(estimateCost('apac.anthropic.claude-haiku-4-5-20251001-v1:0', usage))
+      .toBeCloseTo((1000 * 1.00 + 1000 * 5.00) / 1e6);
+  });
 });
 
 describe('isScenarioPreviouslyChecked (#11 — fuzzy match pre-checked untested scenarios)', () => {
@@ -442,7 +452,7 @@ describe('callBedrock (Converse API, Bearer auth)', () => {
     const body = JSON.parse(opts.body);
     expect(body.system).toEqual([{ text: 'sys prompt' }]);
     expect(body.messages).toEqual([{ role: 'user', content: [{ text: 'user prompt' }] }]);
-    expect(body.inferenceConfig).toEqual({ maxTokens: 4096 });
+    expect(body.inferenceConfig).toEqual({ maxTokens: 4096, temperature: 0.3 });
   });
 
   test('URL-encodes model IDs containing colons (inference profiles like us.anthropic....:0)', async () => {

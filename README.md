@@ -22,7 +22,7 @@ SherlockQA is a GitHub Action that reviews your pull requests with AI — identi
 
 ## Features
 
-- **Multi-Provider AI** — OpenAI, Anthropic Claude, Google Gemini, Azure OpenAI, AWS Bedrock, and self-hosted Ollama
+- **Multi-Provider AI** — OpenAI, Anthropic Claude, Google Gemini, Azure OpenAI, Azure Responses API, AWS Bedrock, and self-hosted Ollama
 - **Security Audit Mode** — dedicated SAST-style review focused on injections, auth flaws, secrets, crypto misuse, SSRF, XSS, and more
 - **Inline Comments** — posts comments directly on problematic lines
 - **QA Test Scenarios** — suggests manual test cases based on code changes

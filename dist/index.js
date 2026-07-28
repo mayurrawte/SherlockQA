@@ -40199,7 +40199,7 @@ function estimateCost(model, usage) {
   // Bedrock Claude IDs carry a provider prefix (anthropic., us.anthropic.,
   // eu.anthropic.) — strip it so the claude-* pricing rows match. AWS-set
   // Bedrock prices can differ from Anthropic list prices; this is an estimate.
-  const normalized = (model || '').replace(/^(us\.|eu\.)?anthropic\./, '');
+  const normalized = (model || '').replace(/^(us\.|eu\.|apac\.|global\.)?anthropic\./, '');
   // Match by prefix so versioned model IDs (claude-sonnet-4-5-20251001) still
   // resolve; longest key first so gpt-4.1-mini-* can never match gpt-4 (#10).
   let entry = PRICING[normalized];
@@ -40382,7 +40382,7 @@ async function callBedrock(systemPrompt, userPrompt, model, maxTokens) {
     body: JSON.stringify({
       system: [{ text: systemPrompt }],
       messages: [{ role: 'user', content: [{ text: userPrompt }] }],
-      inferenceConfig: { maxTokens }
+      inferenceConfig: { maxTokens, temperature: 0.3 }
     })
   });
   if (!response.ok) {
