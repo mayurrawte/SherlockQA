@@ -271,6 +271,7 @@ function loadRepoConfig() {
 function defaultModelFor(provider) {
   switch (provider) {
     case 'anthropic': return 'claude-sonnet-4-5';
+    case 'bedrock': return 'anthropic.claude-sonnet-5';
     case 'gemini': return 'gemini-2.0-flash';
     case 'ollama': return 'llama3.1';
     case 'azure':
@@ -383,6 +384,7 @@ async function getAIReview(opts) {
   const callers = {
     'azure-responses': (t) => callAzureResponsesAPI(systemPrompt, userPrompt, model, t),
     'azure': (t) => callAzureOpenAI(systemPrompt, userPrompt, model, t),
+    'bedrock': (t) => callBedrock(systemPrompt, userPrompt, model, t),
     'anthropic': (t) => callAnthropic(systemPrompt, userPrompt, model, t),
     'gemini': (t) => callGemini(systemPrompt, userPrompt, model, t),
     'ollama': (t) => callOllama(systemPrompt, userPrompt, model, t),
@@ -1305,4 +1307,5 @@ module.exports = {
   callAnthropic,
   callOllama,
   callBedrock,
+  defaultModelFor,
 };

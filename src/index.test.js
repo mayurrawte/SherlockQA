@@ -15,6 +15,7 @@ const {
   callAnthropic,
   callOllama,
   callBedrock,
+  defaultModelFor,
 } = require('./index');
 
 // Silence @actions/core's ::warning:: output during the parse-fallback tests.
@@ -473,6 +474,12 @@ describe('callBedrock (Converse API, Bearer auth)', () => {
     global.fetch = jest.fn().mockResolvedValue(okResponse({ usage: undefined }));
     const r = await callBedrock('s', 'u', 'anthropic.claude-sonnet-5', 4096);
     expect(r.usage).toEqual({ input: 0, output: 0 });
+  });
+});
+
+describe('bedrock provider wiring', () => {
+  test('defaultModelFor(bedrock) is the prefixed Bedrock Claude id', () => {
+    expect(defaultModelFor('bedrock')).toBe('anthropic.claude-sonnet-5');
   });
 });
 
