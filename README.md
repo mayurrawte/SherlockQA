@@ -81,6 +81,8 @@ jobs:
 | `mode` | Review mode: `general` or `security` | No | `general` |
 | `min-severity` | Minimum severity to report | No | `warning` |
 | `ignore-patterns` | Files to ignore (comma-separated globs) | No | `*.md,*.txt,...` |
+| `max-comments` | Maximum inline review comments per PR (noise budget). Overflow collapses into a "Minor notes" block. `0` = unlimited | No | `5` |
+| `min-confidence` | Drop findings whose model confidence (0-1) is below this | No | `0.6` |
 | `persona` | Custom persona/role instructions | No | - |
 | `domain-knowledge` | Domain-specific context for better reviews | No | - |
 | `max-tokens` | Maximum tokens for AI response | No | `4096` |
@@ -104,6 +106,15 @@ jobs:
 | `gemini` | `gemini-2.0-flash` |
 | `ollama` | `llama3.1` |
 | `azure` / `azure-responses` | `gpt-4o-mini` |
+
+### Review noise controls
+
+SherlockQA budgets its feedback so every comment is worth reading:
+
+- `max-comments` (default 5) caps inline comments; the model is told to report only its highest-impact findings, and any overflow collapses into a "Minor notes" block.
+- `min-confidence` (default 0.6) drops findings the model itself isn't sure about.
+- Suggestion-severity nits never become inline comments — they land in the collapsed "Minor notes" block.
+- Clean approvals render as a single verdict line, not a full report.
 
 ## Outputs
 

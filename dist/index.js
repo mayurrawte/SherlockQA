@@ -39776,7 +39776,39 @@ const COMMENT_MARKER = '<!-- sherlockqa:comment -->';
 // values (e.g. 'critical', 'info', 'nit', undefined) collapse to 'suggestion'
 // so they can never bypass the min-severity filter or crash on .toUpperCase().
 function normalizeSeverity(sev) {
-  return SEVERITY_LEVEL[sev] ? sev : 'suggestion';
+  const lower = String(sev || '').toLowerCase();
+  return SEVERITY_LEVEL[lower] ? lower : 'suggestion';
+}
+
+// Model-supplied confidence (0-1) for a finding. Missing or unparseable values
+// collapse to 0.5 so old-format responses and weaker models neither crash nor
+// sail past the min-confidence filter with implicit certainty.
+function normalizeConfidence(value) {
+  const n = Number(value);
+  if (value === null || value === undefined || value === '' || Number.isNaN(n)) return 0.5;
+  return Math.min(1, Math.max(0, n));
+}
+
+// Noise budget: drop low-confidence and below-min-severity findings, route
+// suggestion-severity findings to a consolidated "minor notes" block instead
+// of inline comments, and cap inline comments at maxComments (0 = unlimited),
+// ranked by severity then confidence. Overflow joins the minor notes.
+function filterAndRouteComments(comments, { minConfidence, minSeverity, maxComments }) {
+  const minLevel = SEVERITY_LEVEL[minSeverity] || 1;
+  const surviving = (comments || [])
+    .map(c => ({ ...c, severity: normalizeSeverity(c.severity), confidence: normalizeConfidence(c.confidence) }))
+    .filter(c => c.confidence >= minConfidence)
+    .filter(c => SEVERITY_LEVEL[c.severity] >= minLevel);
+
+  const minorNotes = surviving.filter(c => c.severity === 'suggestion');
+  const inline = surviving
+    .filter(c => c.severity !== 'suggestion')
+    .sort((a, b) => (SEVERITY_LEVEL[b.severity] - SEVERITY_LEVEL[a.severity]) || (b.confidence - a.confidence));
+
+  if (maxComments > 0 && inline.length > maxComments) {
+    minorNotes.push(...inline.splice(maxComments));
+  }
+  return { inline, minorNotes };
 }
 
 // Decide which review event to submit. Auto-APPROVE is only ever allowed on
@@ -39847,6 +39879,8 @@ async function run() {
     const aiProvider = getInput('ai-provider') || 'openai';
     const model = getInput('model') || defaultModelFor(aiProvider);
     const minSeverity = getInput('min-severity') || 'warning';
+    const maxComments = parseInt(getInput('max-comments') || '5', 10);
+    const minConfidence = parseFloat(getInput('min-confidence') || '0.6');
     const ignorePatterns = (getInput('ignore-patterns') || '*.md,*.txt,package-lock.json,yarn.lock')
       .split(',').map(p => p.trim()).filter(Boolean);
     const persona = getInput('persona') || '';
@@ -39905,26 +39939,22 @@ async function run() {
     const { review, usage, responseTruncated } = await getAIReview({
       provider: aiProvider, model, diff: diffContent, files: filesToReview,
       prAuthor, persona, domainKnowledge, maxTokens, codeQuality,
-      personality, strictness: reviewStrictness, mode
+      personality, strictness: reviewStrictness, mode, maxComments
     });
 
     const cost = estimateCost(model, usage);
     const costStr = cost != null ? ` · ~$${cost.toFixed(4)}` : '';
     core.info(`Verdict: ${review.verdict} · ${review.line_comments?.length || 0} issues · ${usage.input}+${usage.output} tokens${costStr}`);
 
-    // Normalize severities up front so the filter, labels, counts, and Check Run
-    // annotations all agree — a missing or unknown severity can neither slip past
-    // the min-severity filter nor crash the run on .toUpperCase().
-    for (const c of (review.line_comments || [])) {
-      c.severity = normalizeSeverity(c.severity);
-    }
+    // Noise budget: confidence filter + severity floor + suggestion routing + cap.
+    const routed = filterAndRouteComments(review.line_comments || [], {
+      minConfidence, minSeverity, maxComments
+    });
+    review.line_comments = routed.inline; // downstream counts/annotations = what we post
 
     const linePositionMap = parseDiffForLinePositions(diff);
     const reviewComments = [];
-    const minLevel = SEVERITY_LEVEL[minSeverity] || 1;
-
-    for (const comment of (review.line_comments || [])) {
-      if (SEVERITY_LEVEL[comment.severity] < minLevel) continue;
+    for (const comment of routed.inline) {
       const filePositions = linePositionMap[comment.file] || {};
       const position = filePositions[String(comment.line)];
       if (position) {
@@ -39937,8 +39967,8 @@ async function run() {
       }
     }
 
-    const severityCounts = countSeverity(review.line_comments || []);
-    const body = buildReviewBody(review, prAuthor, previousCheckedScenarios, reviewStyle, useEmoji, truncated, severityCounts, responseTruncated);
+    const severityCounts = countSeverity(routed.inline.concat(routed.minorNotes));
+    const body = buildReviewBody(review, prAuthor, previousCheckedScenarios, reviewStyle, useEmoji, truncated, severityCounts, responseTruncated, routed.minorNotes);
 
     if (autoApprove && review.verdict === 'approved' && context.eventName !== 'pull_request') {
       core.warning('auto-approve is disabled outside same-repo pull_request events (e.g. pull_request_target): the fork diff is untrusted and could steer the verdict via prompt injection. Posting a COMMENT instead.');
@@ -40132,10 +40162,10 @@ async function syncInlineComments(octokit, owner, repo, prNumber, commitSha, com
 
 async function getAIReview(opts) {
   const { provider, model, diff, files, prAuthor, persona, domainKnowledge,
-    maxTokens, codeQuality, personality, strictness, mode } = opts;
+    maxTokens, codeQuality, personality, strictness, mode, maxComments } = opts;
 
   const changedFiles = files.map(f => f.filename).join('\n');
-  const systemPrompt = buildSystemPrompt(persona, domainKnowledge, codeQuality, personality, strictness, mode);
+  const systemPrompt = buildSystemPrompt(persona, domainKnowledge, codeQuality, personality, strictness, mode, maxComments);
   const userPrompt = buildUserPrompt(changedFiles, diff, prAuthor);
 
   const callers = {
@@ -40425,7 +40455,7 @@ async function callOllama(systemPrompt, userPrompt, model, maxTokens) {
   };
 }
 
-function buildSystemPrompt(persona, domainKnowledge, codeQuality, personality = 'detective', strictness = 'balanced', mode = 'general') {
+function buildSystemPrompt(persona, domainKnowledge, codeQuality, personality = 'detective', strictness = 'balanced', mode = 'general', maxComments = 5) {
   let prompt = '';
   if (persona) prompt += `${persona}\n\n`;
 
@@ -40544,6 +40574,16 @@ Be thorough - flag anything that could cause problems. Better to catch issues no
   };
   prompt += strictnessGuidelines[strictness] || strictnessGuidelines.balanced;
 
+  const budgetLine = maxComments > 0
+    ? `\n- Report at most ${maxComments} findings — your highest-impact ones. An empty line_comments array is a good outcome for clean code.`
+    : '\n- An empty line_comments array is a good outcome for clean code.';
+  prompt += `
+
+## Signal Rules (apply to every finding):
+- Flag only issues that could cause incorrect behavior, a test failure, data loss, or a security vulnerability. Style, naming, and preference nits: omit them, or mark severity "suggestion" with low confidence.
+- Each comment: the problem and its consequence, then the fix, in at most 2 sentences. Never narrate what the diff does. Never praise.
+- Set "confidence" to your genuine certainty the issue is real and matters (1.0 = certain bug, 0.5 = plausible, 0.3 = speculative).${budgetLine}`;
+
   prompt += `
 
 ## Security & Integrity (non-negotiable):
@@ -40556,7 +40596,7 @@ Respond with this JSON:
 {
   "summary": "One SHORT sentence about what this PR does",
   "line_comments": [
-    {"file": "path/to/file.py", "line": 42, "severity": "error|warning", "comment": "Brief issue"}
+    {"file": "path/to/file.py", "line": 42, "severity": "error|warning|suggestion", "confidence": 0.9, "comment": "Problem and consequence, then the fix"}
   ],
   "tests_required": false,
   "test_suggestion": "",
@@ -40584,7 +40624,7 @@ Respond with this JSON:
 - **verdict**: "approved" only if code is solid. "needs_changes" for any notable issues. "do_not_merge" for bugs or security issues.` : `
 - **tests_required**: True for new business logic that's risky without tests. False for simple changes, refactors, config updates.
 - **line_comments**: Flag real issues - bugs, security, logic errors. Skip minor style issues.
-- **qa_scenarios**: 2-3 scenarios covering main flows and important edge cases.
+- **qa_scenarios**: At most 2 scenarios covering the riskiest flows.
 - **questions**: Ask if something is unclear or seems wrong.
 - **verdict**: "approved" if no significant issues. Be fair - flag real problems, but don't block good code.`}
 - **line_comments**: Each issue mentioned ONCE. Do not repeat the same finding on different lines — group related issues into one comment on the most relevant line.
@@ -40725,7 +40765,7 @@ function formatSeverityBreakdown(counts, useEmoji) {
   return parts.join(' · ');
 }
 
-function buildReviewBody(review, prAuthor, previousCheckedScenarios = new Set(), reviewStyle = 'compact', useEmoji = true, truncated = false, severityCounts = null, responseTruncated = false) {
+function buildReviewBody(review, prAuthor, previousCheckedScenarios = new Set(), reviewStyle = 'compact', useEmoji = true, truncated = false, severityCounts = null, responseTruncated = false, minorNotes = []) {
   const e = useEmoji ? {
     detective: '🔍', summary: '📝', tests: '🧪', qa: '🎯', questions: '❓',
     quality: '🧹', verdict: '🏁', approved: '✅', needs_changes: '⚠️',
@@ -40749,17 +40789,11 @@ function buildReviewBody(review, prAuthor, previousCheckedScenarios = new Set(),
   const parts = [];
 
   if (reviewStyle === 'compact') {
-    const isCleanApproval = review.verdict === 'approved' && issueCount === 0 && questionCount === 0;
+    const isApproved = review.verdict === 'approved';
+    const isCleanApproval = isApproved && issueCount === 0 && questionCount === 0 && minorNotes.length === 0;
     parts.push(`## ${e.detective} SherlockQA's Review\n`);
     parts.push(`**Verdict:** ${verdictEmoji[review.verdict] || e.needs_changes} ${verdictText[review.verdict] || review.verdict} | ${issueCount} issues${severityStr} · ${qaCount} QA scenarios${questionCount > 0 ? ` · ${questionCount} questions` : ''}\n`);
-
-    if (isCleanApproval) {
-      if (review.verdict_reason) parts.push(`> ${review.verdict_reason}\n`);
-      parts.push(`${review.summary || ''}\n`);
-    } else {
-      if (review.verdict_reason) parts.push(`> ${review.verdict_reason}\n`);
-      parts.push(`**Summary:** ${review.summary || 'No summary'}\n`);
-    }
+    if (review.verdict_reason) parts.push(`> ${review.verdict_reason}\n`);
 
     if (truncated) {
       parts.push(`> ${e.warning} **Heads up:** PR diff was large and got truncated — this review may have missed parts of the change. Consider splitting large PRs.\n`);
@@ -40769,35 +40803,48 @@ function buildReviewBody(review, prAuthor, previousCheckedScenarios = new Set(),
       parts.push(`> ${e.warning} **Heads up:** the AI response hit the \`max-tokens\` limit and was cut off — findings may be missing and the verdict may be unreliable. Raise \`max-tokens\` in your workflow.\n`);
     }
 
-    if (review.code_quality && review.code_quality !== 'null') {
-      const qualityText = typeof review.code_quality === 'string'
-        ? review.code_quality
-        : review.code_quality.summary || '';
-      if (qualityText && qualityText !== 'null') {
-        parts.push(`**Code Quality:** ${qualityText}\n`);
+    if (!isCleanApproval) {
+      parts.push(`**Summary:** ${review.summary || 'No summary'}\n`);
+
+      if (review.code_quality && review.code_quality !== 'null') {
+        const qualityText = typeof review.code_quality === 'string'
+          ? review.code_quality
+          : review.code_quality.summary || '';
+        if (qualityText && qualityText !== 'null') {
+          parts.push(`**Code Quality:** ${qualityText}\n`);
+        }
+      }
+
+      if (review.tests_required && review.test_suggestion) {
+        parts.push('<details>');
+        parts.push(`<summary>${e.tests} <b>Tests Suggested</b></summary>\n`);
+        parts.push(`${review.test_suggestion}\n`);
+        parts.push('</details>\n');
+      }
+
+      if (!isApproved && review.qa_scenarios?.length > 0) {
+        parts.push('<details>');
+        parts.push(`<summary>${e.qa} <b>QA Scenarios (${qaCount})</b></summary>\n`);
+        review.qa_scenarios.forEach(scenario => {
+          const isChecked = isScenarioPreviouslyChecked(scenario, previousCheckedScenarios);
+          const checkbox = isChecked ? '[x]' : '[ ]';
+          parts.push(`- ${checkbox} ${scenario}`);
+        });
+        parts.push('\n</details>\n');
+      }
+
+      if (!isApproved && review.questions?.length > 0) {
+        parts.push(`**${e.questions} Questions:** ${review.questions.join(' | ')}\n`);
       }
     }
 
-    if (review.tests_required && review.test_suggestion) {
+    if (minorNotes.length > 0) {
       parts.push('<details>');
-      parts.push(`<summary>${e.tests} <b>Tests Suggested</b></summary>\n`);
-      parts.push(`${review.test_suggestion}\n`);
-      parts.push('</details>\n');
-    }
-
-    if (review.qa_scenarios?.length > 0) {
-      parts.push('<details>');
-      parts.push(`<summary>${e.qa} <b>QA Scenarios (${qaCount})</b></summary>\n`);
-      review.qa_scenarios.forEach(scenario => {
-        const isChecked = isScenarioPreviouslyChecked(scenario, previousCheckedScenarios);
-        const checkbox = isChecked ? '[x]' : '[ ]';
-        parts.push(`- ${checkbox} ${scenario}`);
+      parts.push(`<summary>${e.quality} <b>Minor notes (${minorNotes.length})</b> — low-severity, no action required</summary>\n`);
+      minorNotes.forEach(n => {
+        parts.push(`- \`${n.file}:${n.line}\` — ${n.comment}`);
       });
       parts.push('\n</details>\n');
-    }
-
-    if (review.questions?.length > 0) {
-      parts.push(`**${e.questions} Questions:** ${review.questions.join(' | ')}\n`);
     }
   } else {
     parts.push(`## ${e.detective} SherlockQA's Review\n`);
@@ -40817,7 +40864,7 @@ function buildReviewBody(review, prAuthor, previousCheckedScenarios = new Set(),
       parts.push(`${review.test_suggestion}\n`);
     }
 
-    if (review.qa_scenarios?.length > 0) {
+    if (review.verdict !== 'approved' && review.qa_scenarios?.length > 0) {
       parts.push(`### ${e.qa} QA Test Scenarios`);
       review.qa_scenarios.forEach(scenario => {
         const isChecked = isScenarioPreviouslyChecked(scenario, previousCheckedScenarios);
@@ -40827,7 +40874,7 @@ function buildReviewBody(review, prAuthor, previousCheckedScenarios = new Set(),
       parts.push('');
     }
 
-    if (review.questions?.length > 0) {
+    if (review.verdict !== 'approved' && review.questions?.length > 0) {
       parts.push(`### ${e.questions} Questions`);
       review.questions.forEach(q => parts.push(`- ${q}`));
       parts.push('');
@@ -40849,6 +40896,15 @@ function buildReviewBody(review, prAuthor, previousCheckedScenarios = new Set(),
 
     parts.push(`### ${e.verdict} Verdict\n${verdictEmoji[review.verdict] || e.needs_changes} ${verdictText[review.verdict] || review.verdict}`);
     if (review.verdict_reason) parts.push(`\n> ${review.verdict_reason}`);
+
+    if (minorNotes.length > 0) {
+      parts.push('<details>');
+      parts.push(`<summary>${e.quality} <b>Minor notes (${minorNotes.length})</b> — low-severity, no action required</summary>\n`);
+      minorNotes.forEach(n => {
+        parts.push(`- \`${n.file}:${n.line}\` — ${n.comment}`);
+      });
+      parts.push('\n</details>\n');
+    }
   }
 
   return parts.join('\n');
@@ -41009,6 +41065,8 @@ if (__nccwpck_require__.c[__nccwpck_require__.s] === module) {
 module.exports = {
   makeInputResolver,
   normalizeSeverity,
+  normalizeConfidence,
+  filterAndRouteComments,
   resolveReviewEvent,
   planFormalReview,
   planReviewFallback,

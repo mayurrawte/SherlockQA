@@ -121,6 +121,8 @@ async function run() {
     const aiProvider = getInput('ai-provider') || 'openai';
     const model = getInput('model') || defaultModelFor(aiProvider);
     const minSeverity = getInput('min-severity') || 'warning';
+    const maxComments = parseInt(getInput('max-comments') || '5', 10);
+    const minConfidence = parseFloat(getInput('min-confidence') || '0.6');
     const ignorePatterns = (getInput('ignore-patterns') || '*.md,*.txt,package-lock.json,yarn.lock')
       .split(',').map(p => p.trim()).filter(Boolean);
     const persona = getInput('persona') || '';
@@ -179,26 +181,22 @@ async function run() {
     const { review, usage, responseTruncated } = await getAIReview({
       provider: aiProvider, model, diff: diffContent, files: filesToReview,
       prAuthor, persona, domainKnowledge, maxTokens, codeQuality,
-      personality, strictness: reviewStrictness, mode
+      personality, strictness: reviewStrictness, mode, maxComments
     });
 
     const cost = estimateCost(model, usage);
     const costStr = cost != null ? ` · ~$${cost.toFixed(4)}` : '';
     core.info(`Verdict: ${review.verdict} · ${review.line_comments?.length || 0} issues · ${usage.input}+${usage.output} tokens${costStr}`);
 
-    // Normalize severities up front so the filter, labels, counts, and Check Run
-    // annotations all agree — a missing or unknown severity can neither slip past
-    // the min-severity filter nor crash the run on .toUpperCase().
-    for (const c of (review.line_comments || [])) {
-      c.severity = normalizeSeverity(c.severity);
-    }
+    // Noise budget: confidence filter + severity floor + suggestion routing + cap.
+    const routed = filterAndRouteComments(review.line_comments || [], {
+      minConfidence, minSeverity, maxComments
+    });
+    review.line_comments = routed.inline; // downstream counts/annotations = what we post
 
     const linePositionMap = parseDiffForLinePositions(diff);
     const reviewComments = [];
-    const minLevel = SEVERITY_LEVEL[minSeverity] || 1;
-
-    for (const comment of (review.line_comments || [])) {
-      if (SEVERITY_LEVEL[comment.severity] < minLevel) continue;
+    for (const comment of routed.inline) {
       const filePositions = linePositionMap[comment.file] || {};
       const position = filePositions[String(comment.line)];
       if (position) {
@@ -211,8 +209,8 @@ async function run() {
       }
     }
 
-    const severityCounts = countSeverity(review.line_comments || []);
-    const body = buildReviewBody(review, prAuthor, previousCheckedScenarios, reviewStyle, useEmoji, truncated, severityCounts, responseTruncated);
+    const severityCounts = countSeverity(routed.inline.concat(routed.minorNotes));
+    const body = buildReviewBody(review, prAuthor, previousCheckedScenarios, reviewStyle, useEmoji, truncated, severityCounts, responseTruncated, routed.minorNotes);
 
     if (autoApprove && review.verdict === 'approved' && context.eventName !== 'pull_request') {
       core.warning('auto-approve is disabled outside same-repo pull_request events (e.g. pull_request_target): the fork diff is untrusted and could steer the verdict via prompt injection. Posting a COMMENT instead.');
