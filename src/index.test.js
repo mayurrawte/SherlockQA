@@ -77,6 +77,14 @@ describe('filterAndRouteComments (noise budget + nit routing)', () => {
     expect(inline).toHaveLength(0);
   });
 
+  test('confidence at boundary (exactly minConfidence) is kept, not dropped', () => {
+    const { inline, minorNotes } = filterAndRouteComments(
+      [c('error', 0.6), c('warning', 0.6)],
+      { minConfidence: 0.6, minSeverity: 'warning', maxComments: 5 });
+    expect(inline).toHaveLength(2);
+    expect(minorNotes).toHaveLength(0);
+  });
+
   test('suggestion severity routes to minorNotes, never inline', () => {
     const { inline, minorNotes } = filterAndRouteComments(
       [c('suggestion', 0.9), c('warning', 0.9)],
