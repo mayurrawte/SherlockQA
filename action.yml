@@ -75,6 +75,12 @@ inputs:
   ignore-patterns:
     description: 'Comma-separated list of file patterns to ignore. Supports glob (*, **, ?). Default: *.md,*.txt,package-lock.json,yarn.lock. Overridable via .sherlockqa.yml.'
     required: false
+  max-comments:
+    description: 'Maximum inline review comments per PR (noise budget, default: 5). Overflow and suggestion-severity findings collapse into a "Minor notes" block. 0 = unlimited. Overridable via .sherlockqa.yml.'
+    required: false
+  min-confidence:
+    description: 'Drop findings whose model confidence (0-1) is below this (default: 0.6). Findings without a confidence default to 0.5. Overridable via .sherlockqa.yml.'
+    required: false
 
   # Custom Prompts
   persona:

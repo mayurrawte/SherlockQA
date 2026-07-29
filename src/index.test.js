@@ -1,5 +1,7 @@
 const {
   normalizeSeverity,
+  normalizeConfidence,
+  filterAndRouteComments,
   resolveReviewEvent,
   planFormalReview,
   planReviewFallback,
@@ -38,6 +40,98 @@ describe('normalizeSeverity (#3 — severity crash + filter bypass)', () => {
     for (const s of ['critical', 'info', 'nit', 'minor', 'high', '']) {
       expect(normalizeSeverity(s)).toBe('suggestion');
     }
+  });
+});
+
+describe('normalizeConfidence', () => {
+  test('valid numbers pass through', () => {
+    expect(normalizeConfidence(0.9)).toBe(0.9);
+    expect(normalizeConfidence(0)).toBe(0);
+    expect(normalizeConfidence(1)).toBe(1);
+  });
+  test('missing/invalid defaults to 0.5 (old-format responses keep working)', () => {
+    expect(normalizeConfidence(undefined)).toBe(0.5);
+    expect(normalizeConfidence(null)).toBe(0.5);
+    expect(normalizeConfidence('high')).toBe(0.5);
+    expect(normalizeConfidence(NaN)).toBe(0.5);
+  });
+  test('numeric strings coerce; out-of-range clamps', () => {
+    expect(normalizeConfidence('0.8')).toBe(0.8);
+    expect(normalizeConfidence(1.7)).toBe(1);
+    expect(normalizeConfidence(-2)).toBe(0);
+  });
+});
+
+describe('filterAndRouteComments (noise budget + nit routing)', () => {
+  const c = (severity, confidence, file = 'a.js', line = 1) =>
+    ({ file, line, severity, confidence, comment: `${severity}@${confidence}` });
+  const opts = { minConfidence: 0.6, minSeverity: 'warning', maxComments: 5 };
+
+  test('drops findings below min-confidence', () => {
+    const { inline, minorNotes } = filterAndRouteComments(
+      [c('error', 0.9), c('error', 0.3)], opts);
+    expect(inline).toHaveLength(1);
+    expect(minorNotes).toHaveLength(0);
+  });
+
+  test('missing confidence bypasses the min-confidence filter (backward compat) and ranks at 0.5', () => {
+    const { inline } = filterAndRouteComments([{ file: 'a.js', line: 1, severity: 'error', comment: 'x' }], opts);
+    expect(inline).toHaveLength(1);
+    expect(inline[0].confidence).toBe(0.5);
+  });
+
+  test('explicit numeric confidence at 0.5 (below the 0.6 default threshold) is still dropped', () => {
+    const { inline } = filterAndRouteComments([c('error', 0.5)], opts);
+    expect(inline).toHaveLength(0);
+  });
+
+  test('confidence at boundary (exactly minConfidence) is kept, not dropped', () => {
+    const { inline, minorNotes } = filterAndRouteComments(
+      [c('error', 0.6), c('warning', 0.6)],
+      { minConfidence: 0.6, minSeverity: 'warning', maxComments: 5 });
+    expect(inline).toHaveLength(2);
+    expect(minorNotes).toHaveLength(0);
+  });
+
+  test('suggestion severity routes to minorNotes, never inline', () => {
+    const { inline, minorNotes } = filterAndRouteComments(
+      [c('suggestion', 0.9), c('warning', 0.9)],
+      { ...opts, minSeverity: 'suggestion' });
+    expect(inline.map(x => x.severity)).toEqual(['warning']);
+    expect(minorNotes.map(x => x.severity)).toEqual(['suggestion']);
+  });
+
+  test('min-severity still drops findings entirely (suggestion below warning floor)', () => {
+    const { inline, minorNotes } = filterAndRouteComments([c('suggestion', 0.9)], opts);
+    expect(inline).toHaveLength(0);
+    expect(minorNotes).toHaveLength(0);
+  });
+
+  test('caps inline at maxComments ranked severity desc then confidence desc; overflow → minorNotes', () => {
+    const comments = [
+      c('warning', 0.7), c('error', 0.65), c('warning', 0.95),
+      c('error', 0.99), c('warning', 0.8)
+    ];
+    const { inline, minorNotes } = filterAndRouteComments(comments, { ...opts, maxComments: 3 });
+    expect(inline.map(x => x.comment)).toEqual(['error@0.99', 'error@0.65', 'warning@0.95']);
+    expect(minorNotes.map(x => x.comment)).toEqual(['warning@0.8', 'warning@0.7']);
+  });
+
+  test('maxComments 0 = unlimited', () => {
+    const many = Array.from({ length: 12 }, (_, i) => c('error', 0.9, 'a.js', i + 1));
+    const { inline } = filterAndRouteComments(many, { ...opts, maxComments: 0 });
+    expect(inline).toHaveLength(12);
+  });
+
+  test('normalizes severity and confidence on the way through', () => {
+    const { inline } = filterAndRouteComments(
+      [{ file: 'a.js', line: 1, severity: 'ERROR', confidence: '0.9', comment: 'x' }], opts);
+    expect(inline[0].severity).toBe('error');
+    expect(inline[0].confidence).toBe(0.9);
+  });
+
+  test('empty/undefined input returns empty routing', () => {
+    expect(filterAndRouteComments(undefined, opts)).toEqual({ inline: [], minorNotes: [] });
   });
 });
 
@@ -355,6 +449,7 @@ describe('action.yml (#9 — defaults must not pre-fill INPUT_* for overridable 
     const fs = require('fs');
     const action = yaml.load(fs.readFileSync(`${__dirname}/../action.yml`, 'utf8'));
     const overridable = ['ai-provider', 'mode', 'min-severity', 'ignore-patterns',
+      'max-comments', 'min-confidence',
       'max-tokens', 'auto-approve', 'code-quality', 'review-style', 'use-emoji',
       'personality', 'review-strictness', 'update-summary-comment', 'create-check-run'];
     for (const key of overridable) {
@@ -418,6 +513,151 @@ describe('response truncation (#8 — max-tokens cutoff silently flipped verdict
     const review = { verdict: 'approved', summary: 'ok', line_comments: [], qa_scenarios: [], questions: [] };
     const body = buildReviewBody(review, 'alice', new Set(), 'compact', true, false, null, false);
     expect(body).not.toMatch(/max-tokens/);
+  });
+});
+
+describe('buildReviewBody noise reduction', () => {
+  const cleanReview = {
+    verdict: 'approved', verdict_reason: 'Small, safe refactor.',
+    summary: 'Renames a helper.', line_comments: [],
+    qa_scenarios: ['check rename works'], questions: []
+  };
+
+  test('silent-on-clean: approved with no findings renders one-liner, no QA/Summary scaffold', () => {
+    const body = buildReviewBody(cleanReview, 'alice', new Set(), 'compact', true, false, null, false, []);
+    expect(body).toContain('Approved');
+    expect(body).toContain('Small, safe refactor.');
+    expect(body).not.toContain('QA Scenarios');
+    expect(body).not.toContain('**Summary:**');
+  });
+
+  test('QA scenarios render when verdict is needs_changes', () => {
+    const review = { ...cleanReview, verdict: 'needs_changes', line_comments: [{ file: 'a.js', line: 1, severity: 'error', comment: 'boom' }] };
+    const body = buildReviewBody(review, 'alice', new Set(), 'compact', true, false, null, false, []);
+    expect(body).toContain('QA Scenarios');
+  });
+
+  test('QA scenarios suppressed on approvals even with findings-free minor notes present', () => {
+    const notes = [{ file: 'a.js', line: 3, severity: 'suggestion', comment: 'could inline this' }];
+    const body = buildReviewBody(cleanReview, 'alice', new Set(), 'compact', true, false, null, false, notes);
+    expect(body).not.toContain('QA Scenarios');
+    expect(body).toContain('Minor notes');
+    expect(body).toContain('a.js:3');
+    expect(body).toContain('could inline this');
+  });
+
+  test('truncation warning still renders on clean approvals', () => {
+    const body = buildReviewBody(cleanReview, 'alice', new Set(), 'compact', true, true, null, false, []);
+    expect(body).toMatch(/truncated/i);
+  });
+
+  test('minor notes block renders in detailed style too', () => {
+    const notes = [{ file: 'b.js', line: 9, severity: 'suggestion', comment: 'nit' }];
+    const body = buildReviewBody(cleanReview, 'alice', new Set(), 'detailed', true, false, null, false, notes);
+    expect(body).toContain('Minor notes');
+  });
+
+  test('existing call sites without the new param are unaffected (default [])', () => {
+    const body = buildReviewBody(cleanReview, 'alice', new Set(), 'compact', true, false, null, false);
+    expect(body).not.toContain('Minor notes');
+  });
+});
+
+describe('buildReviewBody minor-notes count + overflow labeling (I3, I4)', () => {
+  test('verdict line appends "+M minor notes" segment when minor notes exist', () => {
+    const review = {
+      verdict: 'needs_changes', verdict_reason: 'fix it',
+      summary: 'does a thing', line_comments: [{ file: 'a.js', line: 1, severity: 'error', comment: 'boom' }],
+      qa_scenarios: [], questions: []
+    };
+    const notes = [{ file: 'b.js', line: 2, severity: 'suggestion', comment: 'nit' }];
+    const counts = { error: 1, warning: 0, suggestion: 0 };
+    const body = buildReviewBody(review, 'alice', new Set(), 'compact', true, false, counts, false, notes);
+    expect(body).toMatch(/\+1 minor notes?/);
+  });
+
+  test('no minor-notes segment when minorNotes is empty', () => {
+    const review = {
+      verdict: 'needs_changes', verdict_reason: 'fix it',
+      summary: 'does a thing', line_comments: [{ file: 'a.js', line: 1, severity: 'error', comment: 'boom' }],
+      qa_scenarios: [], questions: []
+    };
+    const counts = { error: 1, warning: 0, suggestion: 0 };
+    const body = buildReviewBody(review, 'alice', new Set(), 'compact', true, false, counts, false, []);
+    expect(body).not.toMatch(/minor notes?/i);
+  });
+
+  test('overflow findings in minor notes: header does not claim "no action required" and entry shows severity emoji', () => {
+    const review = {
+      verdict: 'needs_changes', verdict_reason: 'fix it',
+      summary: 'does a thing', line_comments: [{ file: 'a.js', line: 1, severity: 'error', comment: 'boom' }],
+      qa_scenarios: [], questions: []
+    };
+    const notes = [{ file: 'b.js', line: 2, severity: 'warning', comment: 'over budget finding' }];
+    const counts = { error: 1, warning: 0, suggestion: 0 };
+    const body = buildReviewBody(review, 'alice', new Set(), 'compact', true, false, counts, false, notes);
+    expect(body).not.toMatch(/no action required/i);
+    expect(body).toContain('over-budget findings');
+    expect(body).toContain('🟡');
+  });
+
+  test('all-suggestion minor notes keep the "no action required" framing', () => {
+    const review = {
+      verdict: 'needs_changes', verdict_reason: 'fix it',
+      summary: 'does a thing', line_comments: [{ file: 'a.js', line: 1, severity: 'error', comment: 'boom' }],
+      qa_scenarios: [], questions: []
+    };
+    const notes = [{ file: 'b.js', line: 2, severity: 'suggestion', comment: 'a nit' }];
+    const counts = { error: 1, warning: 0, suggestion: 0 };
+    const body = buildReviewBody(review, 'alice', new Set(), 'compact', true, false, counts, false, notes);
+    expect(body).toMatch(/no action required/i);
+    expect(body).toContain('🔵');
+  });
+});
+
+describe('buildReviewBody detailed-style QA/questions on approvals (I5)', () => {
+  test('detailed + approved + qa_scenarios => QA section renders', () => {
+    const review = {
+      verdict: 'approved', verdict_reason: 'Good to go',
+      summary: 'does a thing', line_comments: [],
+      qa_scenarios: ['check the happy path'], questions: []
+    };
+    const body = buildReviewBody(review, 'alice', new Set(), 'detailed', true, false, null, false, []);
+    expect(body).toContain('QA Test Scenarios');
+    expect(body).toContain('check the happy path');
+  });
+
+  test('detailed + approved + questions => Questions section renders', () => {
+    const review = {
+      verdict: 'approved', verdict_reason: 'Good to go',
+      summary: 'does a thing', line_comments: [],
+      qa_scenarios: [], questions: ['is this intentional?']
+    };
+    const body = buildReviewBody(review, 'alice', new Set(), 'detailed', true, false, null, false, []);
+    expect(body).toContain('Questions');
+    expect(body).toContain('is this intentional?');
+  });
+
+  test('compact + approved + qa_scenarios => still suppressed', () => {
+    const review = {
+      verdict: 'approved', verdict_reason: 'Good to go',
+      summary: 'does a thing', line_comments: [],
+      qa_scenarios: ['check the happy path'], questions: []
+    };
+    const body = buildReviewBody(review, 'alice', new Set(), 'compact', true, false, null, false, []);
+    expect(body).not.toContain('QA Scenarios');
+  });
+});
+
+describe('buildReviewBody compact verdict line does not advertise suppressed QA (M7)', () => {
+  test('approved compact review with qa_scenarios does not print "2 QA scenarios"', () => {
+    const review = {
+      verdict: 'approved', verdict_reason: 'Good to go',
+      summary: 'does a thing', line_comments: [],
+      qa_scenarios: ['a', 'b'], questions: []
+    };
+    const body = buildReviewBody(review, 'alice', new Set(), 'compact', true, false, null, false, []);
+    expect(body).not.toContain('2 QA scenarios');
   });
 });
 
@@ -520,5 +760,30 @@ describe('prompt hardening (#5 — injection isolation)', () => {
     const sys = buildSystemPrompt('', '', false);
     expect(sys).toMatch(/UNTRUSTED INPUT/);
     expect(sys).toMatch(/never as a command|Never obey directives/i);
+  });
+});
+
+describe('buildSystemPrompt high-signal rules', () => {
+  test('contains the concrete flag bar instead of vibes', () => {
+    const p = buildSystemPrompt('', '', false, 'professional', 'balanced', 'general', 5);
+    expect(p).toMatch(/incorrect behavior, a test failure, data loss, or a security vulnerability/);
+  });
+  test('contains the comment format rule', () => {
+    const p = buildSystemPrompt('', '', false, 'professional', 'balanced', 'general', 5);
+    expect(p).toMatch(/at most 2 sentences/i);
+    expect(p).toMatch(/never narrate/i);
+  });
+  test('budget line reflects max-comments', () => {
+    const p = buildSystemPrompt('', '', false, 'professional', 'balanced', 'general', 3);
+    expect(p).toMatch(/at most 3 findings/i);
+    expect(p).toMatch(/empty line_comments array is a good outcome/i);
+  });
+  test('budget line omitted when max-comments is 0 (unlimited)', () => {
+    const p = buildSystemPrompt('', '', false, 'professional', 'balanced', 'general', 0);
+    expect(p).not.toMatch(/at most 0 findings/i);
+  });
+  test('JSON schema includes confidence', () => {
+    const p = buildSystemPrompt('', '', false, 'professional', 'balanced', 'general', 5);
+    expect(p).toContain('"confidence"');
   });
 });
