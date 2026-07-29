@@ -14,6 +14,8 @@ const {
   buildReviewBody,
   callAnthropic,
   callOllama,
+  callBedrock,
+  defaultModelFor,
 } = require('./index');
 
 // Silence @actions/core's ::warning:: output during the parse-fallback tests.
@@ -163,6 +165,7 @@ describe('isSherlockReview (#21 — emoji-independent self-detection)', () => {
 
 describe('estimateCost (#10 — versioned model IDs matched the shortest prefix)', () => {
   const M = 1_000_000;
+  const usage = { input: 1000, output: 1000 };
 
   test('versioned gpt-4.1-mini resolves to gpt-4.1-mini pricing, not gpt-4 (was 75x too high)', () => {
     expect(estimateCost('gpt-4.1-mini-2025-04-14', { input: M, output: 0 })).toBeCloseTo(0.40);
@@ -186,6 +189,30 @@ describe('estimateCost (#10 — versioned model IDs matched the shortest prefix)
     expect(estimateCost('llama3.1', { input: M, output: M })).toBeNull();
     expect(estimateCost('gpt-4o-mini', { input: 0, output: 0 })).toBeNull();
     expect(estimateCost('gpt-4o-mini', null)).toBeNull();
+  });
+
+  test('bedrock anthropic.-prefixed id resolves to the claude pricing row', () => {
+    expect(estimateCost('anthropic.claude-sonnet-5', usage))
+      .toBeCloseTo((1000 * 3.00 + 1000 * 15.00) / 1e6);
+  });
+
+  test('bedrock us. inference-profile id resolves via prefix strip + version prefix match', () => {
+    expect(estimateCost('us.anthropic.claude-haiku-4-5-20251001-v1:0', usage))
+      .toBeCloseTo((1000 * 1.00 + 1000 * 5.00) / 1e6);
+  });
+
+  test('non-claude bedrock model returns null (no pricing row)', () => {
+    expect(estimateCost('meta.llama3-1-70b-instruct-v1:0', usage)).toBeNull();
+  });
+
+  test('bedrock eu. inference-profile id resolves to the claude pricing row', () => {
+    expect(estimateCost('eu.anthropic.claude-sonnet-5', usage))
+      .toBeCloseTo((1000 * 3.00 + 1000 * 15.00) / 1e6);
+  });
+
+  test('bedrock apac. inference-profile id resolves via prefix strip + version prefix match', () => {
+    expect(estimateCost('apac.anthropic.claude-haiku-4-5-20251001-v1:0', usage))
+      .toBeCloseTo((1000 * 1.00 + 1000 * 5.00) / 1e6);
   });
 });
 
@@ -391,6 +418,93 @@ describe('response truncation (#8 — max-tokens cutoff silently flipped verdict
     const review = { verdict: 'approved', summary: 'ok', line_comments: [], qa_scenarios: [], questions: [] };
     const body = buildReviewBody(review, 'alice', new Set(), 'compact', true, false, null, false);
     expect(body).not.toMatch(/max-tokens/);
+  });
+});
+
+describe('callBedrock (Converse API, Bearer auth)', () => {
+  const origFetch = global.fetch;
+  beforeEach(() => {
+    process.env['INPUT_BEDROCK-API-KEY'] = 'test-bedrock-key';
+    process.env['INPUT_AWS-REGION'] = 'eu-west-1';
+  });
+  afterEach(() => {
+    global.fetch = origFetch;
+    delete process.env['INPUT_BEDROCK-API-KEY'];
+    delete process.env['INPUT_AWS-REGION'];
+  });
+
+  const okResponse = (overrides = {}) => ({
+    ok: true,
+    json: async () => ({
+      output: { message: { role: 'assistant', content: [{ text: '{"verdict": "approved"}' }] } },
+      stopReason: 'end_turn',
+      usage: { inputTokens: 100, outputTokens: 50 },
+      ...overrides
+    })
+  });
+
+  test('sends Converse request: region + URL-encoded model in URL, Bearer header, system/messages/inferenceConfig body', async () => {
+    global.fetch = jest.fn().mockResolvedValue(okResponse());
+    await callBedrock('sys prompt', 'user prompt', 'anthropic.claude-sonnet-5', 4096);
+    const [url, opts] = global.fetch.mock.calls[0];
+    expect(url).toBe('https://bedrock-runtime.eu-west-1.amazonaws.com/model/anthropic.claude-sonnet-5/converse');
+    expect(opts.headers['Authorization']).toBe('Bearer test-bedrock-key');
+    const body = JSON.parse(opts.body);
+    expect(body.system).toEqual([{ text: 'sys prompt' }]);
+    expect(body.messages).toEqual([{ role: 'user', content: [{ text: 'user prompt' }] }]);
+    expect(body.inferenceConfig).toEqual({ maxTokens: 4096, temperature: 0.3 });
+  });
+
+  test('URL-encodes model IDs containing colons (inference profiles like us.anthropic....:0)', async () => {
+    global.fetch = jest.fn().mockResolvedValue(okResponse());
+    await callBedrock('s', 'u', 'us.anthropic.claude-sonnet-4-5-20250929-v1:0', 1024);
+    const [url] = global.fetch.mock.calls[0];
+    expect(url).toContain('/model/us.anthropic.claude-sonnet-4-5-20250929-v1%3A0/converse');
+  });
+
+  test('extracts text and usage from Converse response', async () => {
+    global.fetch = jest.fn().mockResolvedValue(okResponse());
+    const r = await callBedrock('s', 'u', 'anthropic.claude-sonnet-5', 4096);
+    expect(r.content).toBe('{"verdict": "approved"}');
+    expect(r.usage).toEqual({ input: 100, output: 50 });
+    expect(r.truncated).toBe(false);
+  });
+
+  test('flags stopReason=max_tokens as truncated', async () => {
+    global.fetch = jest.fn().mockResolvedValue(okResponse({ stopReason: 'max_tokens' }));
+    const r = await callBedrock('s', 'u', 'anthropic.claude-sonnet-5', 64);
+    expect(r.truncated).toBe(true);
+  });
+
+  test('joins multiple text content blocks and ignores non-text blocks', async () => {
+    global.fetch = jest.fn().mockResolvedValue(okResponse({
+      output: { message: { role: 'assistant', content: [{ text: '{"a":' }, { toolUse: { name: 'x' } }, { text: '1}' }] } }
+    }));
+    const r = await callBedrock('s', 'u', 'anthropic.claude-sonnet-5', 4096);
+    expect(r.content).toBe('{"a":1}');
+  });
+
+  test('non-2xx throws with status attached (so withRetry can decide)', async () => {
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: false, status: 429, text: async () => 'ThrottlingException'
+    });
+    await expect(callBedrock('s', 'u', 'anthropic.claude-sonnet-5', 4096))
+      .rejects.toThrow(/Bedrock API: 429/);
+    await callBedrock('s', 'u', 'anthropic.claude-sonnet-5', 4096).catch(e => {
+      expect(e.status).toBe(429);
+    });
+  });
+
+  test('missing usage fields default to 0', async () => {
+    global.fetch = jest.fn().mockResolvedValue(okResponse({ usage: undefined }));
+    const r = await callBedrock('s', 'u', 'anthropic.claude-sonnet-5', 4096);
+    expect(r.usage).toEqual({ input: 0, output: 0 });
+  });
+});
+
+describe('bedrock provider wiring', () => {
+  test('defaultModelFor(bedrock) is the prefixed Bedrock Claude id', () => {
+    expect(defaultModelFor('bedrock')).toBe('anthropic.claude-sonnet-5');
   });
 });
 

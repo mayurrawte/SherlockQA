@@ -40029,6 +40029,7 @@ function loadRepoConfig() {
 function defaultModelFor(provider) {
   switch (provider) {
     case 'anthropic': return 'claude-sonnet-4-5';
+    case 'bedrock': return 'anthropic.claude-sonnet-5';
     case 'gemini': return 'gemini-2.0-flash';
     case 'ollama': return 'llama3.1';
     case 'azure':
@@ -40141,6 +40142,7 @@ async function getAIReview(opts) {
   const callers = {
     'azure-responses': (t) => callAzureResponsesAPI(systemPrompt, userPrompt, model, t),
     'azure': (t) => callAzureOpenAI(systemPrompt, userPrompt, model, t),
+    'bedrock': (t) => callBedrock(systemPrompt, userPrompt, model, t),
     'anthropic': (t) => callAnthropic(systemPrompt, userPrompt, model, t),
     'gemini': (t) => callGemini(systemPrompt, userPrompt, model, t),
     'ollama': (t) => callOllama(systemPrompt, userPrompt, model, t),
@@ -40185,6 +40187,8 @@ const PRICING = {
   'claude-sonnet-4':     { in: 3.00,  out: 15.00 },
   'claude-sonnet-4-5':   { in: 3.00,  out: 15.00 },
   'claude-haiku-4-5':    { in: 1.00,  out: 5.00 },
+  'claude-sonnet-5':     { in: 3.00,  out: 15.00 },
+  'claude-opus-5':       { in: 5.00,  out: 25.00 },
   'gemini-2.0-flash':    { in: 0.075, out: 0.30 },
   'gemini-2.5-flash':    { in: 0.075, out: 0.30 },
   'gemini-2.5-pro':      { in: 1.25,  out: 5.00 },
@@ -40192,13 +40196,17 @@ const PRICING = {
 
 function estimateCost(model, usage) {
   if (!usage || (!usage.input && !usage.output)) return null;
+  // Bedrock Claude IDs carry a provider prefix (anthropic., us.anthropic.,
+  // eu.anthropic.) — strip it so the claude-* pricing rows match. AWS-set
+  // Bedrock prices can differ from Anthropic list prices; this is an estimate.
+  const normalized = (model || '').replace(/^(us\.|eu\.|apac\.|global\.)?anthropic\./, '');
   // Match by prefix so versioned model IDs (claude-sonnet-4-5-20251001) still
   // resolve; longest key first so gpt-4.1-mini-* can never match gpt-4 (#10).
-  let entry = PRICING[model];
+  let entry = PRICING[normalized];
   if (!entry) {
     const match = Object.keys(PRICING)
       .sort((a, b) => b.length - a.length)
-      .find(k => model && model.startsWith(k));
+      .find(k => normalized && normalized.startsWith(k));
     if (match) entry = PRICING[match];
   }
   if (!entry) return null;
@@ -40354,6 +40362,43 @@ async function callAnthropic(systemPrompt, userPrompt, model, maxTokens) {
     usage: {
       input: result.usage?.input_tokens || 0,
       output: result.usage?.output_tokens || 0
+    }
+  };
+}
+
+async function callBedrock(systemPrompt, userPrompt, model, maxTokens) {
+  const apiKey = core.getInput('bedrock-api-key', { required: true });
+  const region = core.getInput('aws-region') || 'us-east-1';
+  // Converse API is model-agnostic (Claude, Llama, Mistral, Nova...). Bearer
+  // auth uses a Bedrock API key — SigV4/IAM-role auth is intentionally not
+  // supported to keep the zero-SDK fetch pattern.
+  const url = `https://bedrock-runtime.${region}.amazonaws.com/model/${encodeURIComponent(model)}/converse`;
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${apiKey}`
+    },
+    body: JSON.stringify({
+      system: [{ text: systemPrompt }],
+      messages: [{ role: 'user', content: [{ text: userPrompt }] }],
+      inferenceConfig: { maxTokens, temperature: 0.3 }
+    })
+  });
+  if (!response.ok) {
+    const err = new Error(`Bedrock API: ${response.status} - ${await response.text()}`);
+    err.status = response.status;
+    throw err;
+  }
+  const result = await response.json();
+  const blocks = result.output?.message?.content || [];
+  const text = blocks.filter(b => typeof b.text === 'string').map(b => b.text).join('');
+  return {
+    content: text,
+    truncated: result.stopReason === 'max_tokens',
+    usage: {
+      input: result.usage?.inputTokens || 0,
+      output: result.usage?.outputTokens || 0
     }
   };
 }
@@ -41025,6 +41070,8 @@ module.exports = {
   buildReviewBody,
   callAnthropic,
   callOllama,
+  callBedrock,
+  defaultModelFor,
 };
 
 

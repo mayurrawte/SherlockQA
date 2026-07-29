@@ -1,5 +1,5 @@
 name: 'SherlockQA-AI'
-description: 'AI-powered code review and QA that finds bugs, security issues, and suggests test scenarios. Works with OpenAI, Anthropic Claude, Google Gemini, Azure OpenAI, and Ollama.'
+description: 'AI-powered code review and QA that finds bugs, security issues, and suggests test scenarios. Works with OpenAI, Anthropic Claude, Google Gemini, Azure OpenAI, Ollama, and AWS Bedrock.'
 author: 'mayurrawte'
 
 branding:
@@ -14,7 +14,7 @@ inputs:
 
   # AI Provider
   ai-provider:
-    description: 'AI provider: openai, anthropic, gemini, azure, azure-responses, ollama (default: openai). Overridable via .sherlockqa.yml.'
+    description: 'AI provider: openai, anthropic, gemini, azure, azure-responses, ollama, bedrock (default: openai). Overridable via .sherlockqa.yml.'
     required: false
 
   # OpenAI Configuration
@@ -22,7 +22,7 @@ inputs:
     description: 'OpenAI API key (required if ai-provider=openai)'
     required: false
   model:
-    description: 'Model to use. Defaults: openai=gpt-4o-mini, anthropic=claude-sonnet-4-5, gemini=gemini-2.0-flash, ollama=llama3.1'
+    description: 'Model to use. Defaults: openai=gpt-4o-mini, anthropic=claude-sonnet-4-5, gemini=gemini-2.0-flash, ollama=llama3.1, bedrock=anthropic.claude-sonnet-5'
     required: false
 
   # Anthropic Configuration
@@ -55,6 +55,15 @@ inputs:
     description: 'Azure OpenAI API version'
     required: false
     default: '2024-02-15-preview'
+
+  # AWS Bedrock Configuration
+  bedrock-api-key:
+    description: 'AWS Bedrock API key — Bearer token (required if ai-provider=bedrock). IAM-role/SigV4 auth is not supported.'
+    required: false
+  aws-region:
+    description: 'AWS region for the Bedrock runtime endpoint'
+    required: false
+    default: 'us-east-1'
 
   # Review Configuration
   mode:
