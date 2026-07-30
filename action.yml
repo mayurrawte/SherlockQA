@@ -130,6 +130,14 @@ inputs:
     description: 'Create a GitHub Check Run so the verdict and annotations appear in the PR Checks column — requires checks:write permission (default: true). Overridable via .sherlockqa.yml.'
     required: false
 
+  # Codebase Context (Blast-Radius Reviews)
+  codebase-context:
+    description: 'Cross-file impact context for changed symbols: auto (default; enabled when a git checkout of the PR head is present), true (always attempt, warns if no checkout), false (disabled). Requires actions/checkout before this action. Overridable via .sherlockqa.yml.'
+    required: false
+  context-max-chars:
+    description: 'Character cap on the rendered cross-file context section (default: 10000). Overridable via .sherlockqa.yml.'
+    required: false
+
 outputs:
   verdict:
     description: 'Review verdict (approved, needs_changes, do_not_merge)'

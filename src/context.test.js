@@ -58,6 +58,17 @@ describe('extractChangedSymbols (tree-sitter)', () => {
     expect(syms.map(s => s.name)).toContain('main');
   });
 
+  test('changedLines reflects how many changed lines overlap the definition', async () => {
+    const { p, src } = fx('sample.py');
+    // sample.py's rate_for spans lines 1-2 (see the "changed line inside a
+    // function" case above); widening the changed range to cover both lines
+    // of the def should report changedLines: 2, not 1.
+    const syms = await extractChangedSymbols(p, src, [{ start: 1, end: 2 }]);
+    const rateFor = syms.find(s => s.name === 'rate_for');
+    expect(rateFor).toBeDefined();
+    expect(rateFor.changedLines).toBe(2);
+  });
+
   test('one grammar failing to load falls back to regex for that language only, without poisoning others', async () => {
     const context = require('./context');
     context.__resetParsersForTest();
@@ -188,6 +199,36 @@ describe('buildContextSection', () => {
     expect(section).not.toContain('f3.py:3');
     expect(section).not.toContain('### b');
     expect(section.length).toBeLessThanOrEqual(200 + 400);
+  });
+
+  test('prioritizes the symbol with more changed lines under a tight cap (I-A)', () => {
+    // 'a' comes first in input order but only touched 1 changed line; 'b'
+    // comes second but touched 5. The cap is tight enough for only one
+    // symbol's ref to fit, so 'b' (higher priority) must survive, not 'a'.
+    const snippet = 'x'.repeat(80);
+    const refs = [
+      { symbol: 'a', file: 'f1.py', line: 1, snippet, changedLines: 1 },
+      { symbol: 'b', file: 'f2.py', line: 2, snippet, changedLines: 5 },
+    ];
+    const section = buildContextSection(refs, { maxChars: 120 });
+    expect(section).toContain('### b');
+    expect(section).toContain('f2.py:2');
+    expect(section).not.toContain('### a');
+    expect(section).not.toContain('f1.py:1');
+  });
+
+  test('an oversized group does not starve a smaller later group (I-B)', () => {
+    // 'big' has a snippet too large to fit at all; 'small' comes after it and
+    // easily fits. 'small' must still be rendered — the loop must skip 'big'
+    // and continue, not bail out entirely on the first non-fitting group.
+    const refs = [
+      { symbol: 'big', file: 'big.py', line: 1, snippet: 'x'.repeat(500), changedLines: 1 },
+      { symbol: 'small', file: 'small.py', line: 2, snippet: 'y', changedLines: 1 },
+    ];
+    const section = buildContextSection(refs, { maxChars: 200 });
+    expect(section).not.toContain('### big');
+    expect(section).toContain('### small');
+    expect(section).toContain('small.py:2');
   });
 });
 

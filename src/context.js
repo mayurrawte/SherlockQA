@@ -94,14 +94,35 @@ function overlaps(node, ranges) {
   return ranges.some((r) => s <= r.end && e >= r.start);
 }
 
+// Counts how many changed lines (from `ranges`) fall within [s, e] (1-indexed,
+// inclusive). Used to prioritize symbols by how much of their definition
+// actually changed (spec step 5).
+function countChangedLines(s, e, ranges) {
+  let count = 0;
+  for (const r of ranges) {
+    const start = Math.max(s, r.start);
+    const end = Math.min(e, r.end);
+    if (start <= end) count += end - start + 1;
+  }
+  return count;
+}
+
+// Merges duplicate symbols (same key), summing changedLines across the
+// duplicates so a symbol touched by multiple overlapping ranges/entries keeps
+// its full weight for priority ordering.
 function dedupeByName(symbols) {
-  const seen = new Set();
+  const seen = new Map();
   const out = [];
   for (const sym of symbols) {
     const key = `${sym.kind}:${sym.name}:${sym.file}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    out.push(sym);
+    const existing = seen.get(key);
+    if (existing) {
+      existing.changedLines = (existing.changedLines || 0) + (sym.changedLines || 0);
+      continue;
+    }
+    const copy = { ...sym };
+    seen.set(key, copy);
+    out.push(copy);
   }
   return out;
 }
@@ -132,17 +153,20 @@ async function extractChangedSymbols(filePath, source, changedRanges) {
 
     const visit = (node, insideClass) => {
       if (DEF_TYPES[grammar].includes(node.type) && overlaps(node, changedRanges)) {
+        const s = node.startPosition.row + 1;
+        const e = node.endPosition.row + 1;
+        const changedLines = countChangedLines(s, e, changedRanges);
         if (node.type === 'variable_declarator') {
           const valueNode = node.childForFieldName('value');
           if (isFunctionLike(valueNode)) {
             const nameNode = node.childForFieldName('name');
-            if (nameNode) out.push({ name: nameNode.text, kind: 'function', file: filePath });
+            if (nameNode) out.push({ name: nameNode.text, kind: 'function', file: filePath, changedLines });
           }
         } else {
           const nameNode = node.childForFieldName('name')
             || node.namedChildren.find((c) => c.type === 'identifier' || c.type === 'constant' || c.type === 'type_identifier');
           if (nameNode) {
-            out.push({ name: nameNode.text, kind: kindForNodeType(node.type, insideClass), file: filePath });
+            out.push({ name: nameNode.text, kind: kindForNodeType(node.type, insideClass), file: filePath, changedLines });
           }
         }
       }
@@ -175,7 +199,7 @@ function extractSymbolsRegex(filePath, source, changedRanges) {
       if (line === undefined) continue;
       const match = DEF_REGEX.exec(line);
       if (match) {
-        out.push({ name: match[1], kind: kindForRegexKeyword(match[0]), file: filePath });
+        out.push({ name: match[1], kind: kindForRegexKeyword(match[0]), file: filePath, changedLines: 1 });
       }
     }
   }
@@ -281,6 +305,7 @@ function findReferences(symbols, options = {}) {
         file: hit.file,
         line: hit.line,
         snippet: readSnippet(cwd, hit.file, hit.line),
+        changedLines: sym.changedLines || 0,
       });
     }
   }
@@ -298,9 +323,12 @@ const DESCRIPTION = [
   'return shapes). Do not review this code itself.',
 ].join('\n');
 
-// Groups refs by symbol, preserving the order symbols were first seen in
-// (i.e. the priority order findReferences produced them in), and sorts each
-// symbol's own refs by file/line for deterministic rendering.
+// Groups refs by symbol, preserving the order symbols were first seen in,
+// then sorts groups by total changed-line count (desc) so higher-priority
+// symbols (more of their definition changed) are rendered - and survive the
+// maxChars cap - first. Ties keep the original (first-seen) order: Array.sort
+// is stable, and each group's rank is (-changedLines, firstSeenIndex), so
+// equal-changedLines groups never swap relative order.
 function groupBySymbolInOrder(refs) {
   const order = [];
   const groups = new Map();
@@ -311,10 +339,18 @@ function groupBySymbolInOrder(refs) {
     }
     groups.get(ref.symbol).push(ref);
   }
-  return order.map((symbol) => ({
-    symbol,
-    refs: groups.get(symbol).slice().sort(sortByFileThenLine),
-  }));
+  const grouped = order.map((symbol, index) => {
+    const symRefs = groups.get(symbol);
+    const changedLines = Math.max(0, ...symRefs.map((r) => r.changedLines || 0));
+    return {
+      symbol,
+      refs: symRefs.slice().sort(sortByFileThenLine),
+      changedLines,
+      index,
+    };
+  });
+  grouped.sort((a, b) => (b.changedLines - a.changedLines) || (a.index - b.index));
+  return grouped;
 }
 
 function renderRefBlock(ref) {
@@ -325,9 +361,11 @@ function renderRefBlock(ref) {
 // Renders refs into the BEGIN/END CROSS-FILE CONTEXT block, capping the
 // rendered symbol/ref content at maxChars. The BEGIN/END markers and
 // description are fixed overhead outside that cap. Drop order is
-// deterministic: symbols in their input (priority) order, refs within a
-// symbol by file/line; once a ref no longer fits, that ref and everything
-// after it (including later symbols) is dropped whole — no partial snippets.
+// deterministic: symbols in priority order (most changed lines first, ties
+// by input order), refs within a symbol by file/line; within a group, once a
+// ref no longer fits, that ref and the rest of the group's refs are dropped
+// whole (no partial snippets) — but later, smaller groups are still tried,
+// so one oversized group can't starve everything after it.
 function buildContextSection(refs, options = {}) {
   const { maxChars = 10000 } = options;
   if (!refs || refs.length === 0) return '';
@@ -347,7 +385,7 @@ function buildContextSection(refs, options = {}) {
       size += block.length;
     }
 
-    if (fittedBlocks.length === 0) break; // nothing fit; lower-priority groups won't either
+    if (fittedBlocks.length === 0) continue; // nothing fit for this group; try the next (smaller) one
 
     content += header + fittedBlocks.join('');
   }
@@ -359,15 +397,34 @@ function buildContextSection(refs, options = {}) {
 
 // --- Orchestrator ----------------------------------------------------------
 
+// Merges symbols across files/extraction passes by name, summing changedLines
+// (spec step 5 priority weight) across duplicates rather than keeping only
+// the first occurrence's count.
 function dedupeSymbolsByName(symbols) {
-  const seen = new Set();
+  const seen = new Map();
   const out = [];
   for (const sym of symbols) {
-    if (seen.has(sym.name)) continue;
-    seen.add(sym.name);
-    out.push(sym);
+    const existing = seen.get(sym.name);
+    if (existing) {
+      existing.changedLines = (existing.changedLines || 0) + (sym.changedLines || 0);
+      continue;
+    }
+    const copy = { ...sym };
+    seen.set(sym.name, copy);
+    out.push(copy);
   }
   return out;
+}
+
+// Orders symbols by priority for downstream reference lookup and rendering:
+// most changed lines first, ties broken by the original (first-seen) order.
+// Stable tiebreak is explicit here (not relied on Array.sort's own stability)
+// so the ordering contract holds regardless of engine.
+function sortSymbolsByPriority(symbols) {
+  return symbols
+    .map((sym, index) => ({ sym, index }))
+    .sort((a, b) => (b.sym.changedLines || 0) - (a.sym.changedLines || 0) || a.index - b.index)
+    .map((entry) => entry.sym);
 }
 
 // Full pipeline: detect a usable checkout, extract changed symbols from each
@@ -422,7 +479,7 @@ async function gatherCodebaseContext(options = {}) {
       }
     }
 
-    const symbols = dedupeSymbolsByName(allSymbols);
+    const symbols = sortSymbolsByPriority(dedupeSymbolsByName(allSymbols));
     if (symbols.length === 0) return '';
 
     const refs = findReferences(symbols, { cwd, changedFiles: files, ignorePatterns, matchPattern });
