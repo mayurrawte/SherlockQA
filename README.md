@@ -107,7 +107,7 @@ jobs:
 | `anthropic` | `claude-sonnet-4-5` |
 | `gemini` | `gemini-2.0-flash` |
 | `ollama` | `llama3.1` |
-| `bedrock` | `anthropic.claude-sonnet-5` |
+| `bedrock` | `us.anthropic.claude-sonnet-5` |
 | `azure` / `azure-responses` | `gpt-4o-mini` |
 
 ### Review noise controls
@@ -190,6 +190,8 @@ SherlockQA budgets its feedback so every comment is worth reading:
 
 Uses the model-agnostic [Converse API](https://docs.aws.amazon.com/bedrock/latest/APIReference/API_runtime_Converse.html), so any Bedrock chat model works (Claude, Llama, Mistral, Nova...). Authenticate with a [Bedrock API key](https://docs.aws.amazon.com/bedrock/latest/userguide/api-keys.html) (Bearer token) — IAM-role/OIDC/SigV4 auth is not supported.
 
+> Use the inference-profile model ID form (`us.` / `eu.` / `apac.` prefix, e.g. `us.anthropic.claude-sonnet-4-6`) for Claude models — newer Claude models reject the bare `anthropic.` ID with "on-demand throughput isn't supported". Pick the prefix matching your account's region group.
+
 ```yaml
 - uses: mayurrawte/SherlockQA@v1
   with:
@@ -197,7 +199,7 @@ Uses the model-agnostic [Converse API](https://docs.aws.amazon.com/bedrock/lates
     ai-provider: bedrock
     bedrock-api-key: ${{ secrets.BEDROCK_API_KEY }}
     aws-region: us-east-1          # default
-    model: anthropic.claude-sonnet-5   # default; any Converse-compatible model id works
+    model: us.anthropic.claude-sonnet-5   # default; any Converse-compatible model id works
 ```
 
 ### Security Audit Mode

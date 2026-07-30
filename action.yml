@@ -22,7 +22,7 @@ inputs:
     description: 'OpenAI API key (required if ai-provider=openai)'
     required: false
   model:
-    description: 'Model to use. Defaults: openai=gpt-4o-mini, anthropic=claude-sonnet-4-5, gemini=gemini-2.0-flash, ollama=llama3.1, bedrock=anthropic.claude-sonnet-5'
+    description: 'Model to use. Defaults: openai=gpt-4o-mini, anthropic=claude-sonnet-4-5, gemini=gemini-2.0-flash, ollama=llama3.1, bedrock=us.anthropic.claude-sonnet-5'
     required: false
 
   # Anthropic Configuration

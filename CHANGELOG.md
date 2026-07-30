@@ -12,6 +12,11 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) an
 - `/sherlock` slash commands (`review-again`, `explain`, `ignore`, `approve`)
 - See [ROADMAP.md](ROADMAP.md) for full plan.
 
+## [1.3.1]
+
+### Fixed
+- **Bedrock default model now uses the inference-profile ID** (`us.anthropic.claude-sonnet-5`) — the bare `anthropic.` form is rejected by Bedrock with "on-demand throughput isn't supported" (verified against a live account). README documents the `us.` / `eu.` / `apac.` prefix guidance for Claude models.
+
 ## [1.3.0]
 
 ### Added
