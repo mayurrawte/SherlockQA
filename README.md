@@ -55,11 +55,14 @@ jobs:
   review:
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
       - uses: mayurrawte/SherlockQA@v1
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           openai-api-key: ${{ secrets.OPENAI_API_KEY }}
 ```
+
+> `actions/checkout` enables [codebase context](#codebase-context-cross-file-impact) (on by default). Without it, SherlockQA still works — it just reviews the diff alone.
 
 > **💡 Want SherlockQA to approve PRs?** Add `auto-approve: true` and see [Permissions](#enabling-auto-approve) for required setup.
 
@@ -96,6 +99,8 @@ jobs:
 | `review-strictness` | `lenient`, `balanced`, `strict` | No | `balanced` |
 | `update-summary-comment` | Maintain a single sticky issue-comment with the current summary | No | `true` |
 | `create-check-run` | Create a Check Run so verdict appears in the PR Checks column (needs `checks: write`) | No | `true` |
+| `codebase-context` | Cross-file impact context: `auto` (default; on when the workspace has a git checkout), `true` (always attempt, warns if no checkout), `false` (disabled). Requires `actions/checkout` before this action. Overridable via `.sherlockqa.yml` | No | `auto` |
+| `context-max-chars` | Character cap on the rendered cross-file context section | No | `10000` |
 
 *One of `openai-api-key`, `anthropic-api-key`, `gemini-api-key`, `azure-api-key`, or `bedrock-api-key` is required, matching the provider.
 
@@ -118,6 +123,28 @@ SherlockQA budgets its feedback so every comment is worth reading:
 - `min-confidence` (default 0.6) drops findings the model itself isn't sure about.
 - Suggestion-severity findings land in the collapsed "Minor notes" block only when `min-severity: suggestion` is set; at the default `warning` floor, suggestion-severity findings are dropped entirely (never posted, never shown).
 - Clean approvals render as a single verdict line, not a full report.
+
+## Codebase context (cross-file impact)
+
+Diff-only review misses breakage in code the PR doesn't touch — a renamed method, a changed signature, an altered return shape. SherlockQA closes part of that gap by finding *unchanged* code that calls the symbols a PR modifies, and showing the model those call sites so it can flag mismatches instead of guessing blind.
+
+How it works:
+
+1. For each changed file, parse it with [tree-sitter](https://tree-sitter.github.io/tree-sitter/) and collect the functions/methods/classes whose definition overlaps a changed line range.
+2. For each of those symbols, run `git grep` across the checked-out repo to find other, unchanged files that reference it.
+3. Read a few lines of context around each hit and attach it to the review prompt, clearly marked as untrusted, read-only reference material — never as instructions, and never as code to review in its own right.
+
+Supported grammars (precise, AST-based extraction): **JavaScript** (incl. JSX), **TypeScript**, **Python**, **Go**, **Java**, **Ruby**. Any other file extension falls back to a regex-based scan for `function`/`class`/`def`/`func`/`fn` definitions on changed lines — less precise, but still functional.
+
+Requirements and behavior:
+
+- **Requires `actions/checkout`** before the SherlockQA step (see the [Quick Start](#quick-start) example) — the feature needs a real git checkout of the PR head to run `git grep` against.
+- `codebase-context: auto` (the default) enables this automatically when a checkout is detected, and silently skips it otherwise — no checkout, no warning, just a plain diff-only review.
+- Set `codebase-context: true` to get a warning instead of silent skipping when no checkout is present (useful for catching a misconfigured workflow).
+- Set `codebase-context: 'false'` to disable the feature entirely, e.g. to save tokens or opt out.
+- Any failure in this pipeline (parse error, `git grep` failure, missing checkout, etc.) is logged as a warning and falls back to diff-only review — it never fails the action.
+
+Cost: the rendered context section is capped at `context-max-chars` (default `10000` characters, roughly **~2.5k tokens** at the default cap) and added to the prompt sent to your AI provider, so expect a modest increase in input tokens on PRs where cross-file context is found. Lower `context-max-chars` (or set `codebase-context: 'false'`) to trade this off against cost.
 
 ## Outputs
 

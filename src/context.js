@@ -32,10 +32,19 @@ const WASM_FILE_BY_GRAMMAR = {
 
 // Candidate directories to look for the prebuilt wasm files in, in order.
 // Resolved relative to __dirname so this works whether context.js runs from
-// src/ (tests, dev) or dist/ (built action, one directory deeper than
-// node_modules).
+// src/ (tests, dev) or from the ncc-bundled dist/index.js (built action).
+//
+// Note on the dist case: @vercel/ncc bundles all modules into one flat file,
+// and __dirname inside that bundle resolves to the *bundle's own output
+// directory* (dist/), not to a path mirroring the original src/ nesting.
+// scripts/copy-wasm.js copies the wasm files flat into dist/ to match this,
+// so `__dirname` itself (the first entry below) is the real dist candidate.
+// The `node_modules/tree-sitter-wasms/out` variants exist for src/test (dev)
+// runs, where context.js runs from src/ and node_modules lives at the repo
+// root (one level up).
 function wasmCandidateDirs() {
   return [
+    __dirname,
     path.join(__dirname, 'node_modules', 'tree-sitter-wasms', 'out'),
     path.join(__dirname, '..', 'node_modules', 'tree-sitter-wasms', 'out'),
     path.join(__dirname, '..', '..', 'node_modules', 'tree-sitter-wasms', 'out'),
@@ -48,8 +57,15 @@ function resolveWasmPath(grammar) {
     const candidate = path.join(dir, fileName);
     if (fs.existsSync(candidate)) return candidate;
   }
-  // Last resort: let node resolve the package location directly.
-  return require.resolve(`tree-sitter-wasms/out/${fileName}`);
+  // Deliberately NOT `require.resolve(`tree-sitter-wasms/out/${fileName}`)`
+  // here: a dynamic (template-literal) require.resolve call is exactly what
+  // makes @vercel/ncc's static analyzer bundle the *entire* target directory
+  // as assets (all ~36 tree-sitter-wasms grammars, ~49MB) into dist/ "just in
+  // case" — even though wasmCandidateDirs() above already covers both the
+  // dist and src/test layouts. Throwing here keeps that bloat out of dist/;
+  // the caller (initParsers) catches this per-grammar and falls back to
+  // regex extraction, same as any other missing-wasm failure.
+  throw new Error(`tree-sitter wasm file not found for grammar "${grammar}" (${fileName}); checked: ${wasmCandidateDirs().map((d) => path.join(d, fileName)).join(', ')}`);
 }
 
 let parsers = null; // lazy: { [grammar]: Parser instance }, missing key => that grammar failed to load
