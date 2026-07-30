@@ -1,6 +1,15 @@
 const path = require('path');
 const fs = require('fs');
-const { extractChangedSymbols, extractSymbolsRegex } = require('./context');
+const os = require('os');
+const { execFileSync } = require('child_process');
+const {
+  extractChangedSymbols,
+  extractSymbolsRegex,
+  findReferences,
+  buildContextSection,
+  gatherCodebaseContext,
+} = require('./context');
+const { matchPattern } = require('./index');
 
 const fx = (name) => {
   const p = path.join(__dirname, '__fixtures__', name);
@@ -82,5 +91,117 @@ describe('extractSymbolsRegex fallback', () => {
     const src = 'fn main() {\n}\nclass Foo:\n';
     const syms = extractSymbolsRegex('x.rs', src, [{ start: 1, end: 3 }]);
     expect(syms.map(s => s.name)).toEqual(expect.arrayContaining(['main', 'Foo']));
+  });
+});
+
+describe('findReferences', () => {
+  let repoDir;
+
+  beforeAll(() => {
+    repoDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sherlockqa-ctx-fixture-'));
+    execFileSync('git', ['init'], { cwd: repoDir });
+    execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: repoDir });
+    execFileSync('git', ['config', 'user.name', 'Test'], { cwd: repoDir });
+
+    fs.writeFileSync(path.join(repoDir, 'lib.py'), 'def rate_for(x):\n    return x * 2\n');
+
+    // 12 caller lines: line N reads "xN = rate_for(N)". Enough lines that a
+    // middle match (e.g. line 5) has full +/-3 context without hitting an edge,
+    // and enough calls (>5) to exercise the per-symbol cap.
+    const callerLines = [];
+    for (let i = 1; i <= 12; i += 1) callerLines.push(`x${i} = rate_for(${i})`);
+    fs.writeFileSync(path.join(repoDir, 'caller.py'), `${callerLines.join('\n')}\n`);
+
+    fs.writeFileSync(path.join(repoDir, 'ignored.md'), 'See rate_for for details.\n');
+
+    execFileSync('git', ['add', '.'], { cwd: repoDir });
+    execFileSync('git', ['commit', '-m', 'init'], { cwd: repoDir });
+  });
+
+  afterAll(() => {
+    fs.rmSync(repoDir, { recursive: true, force: true });
+  });
+
+  const symbols = [{ name: 'rate_for', kind: 'function', file: 'lib.py' }];
+  // Built lazily per-test (not as a describe-level const) because repoDir is
+  // only assigned inside beforeAll, which runs after the describe body.
+  const baseOpts = (extra) => ({ cwd: repoDir, changedFiles: ['lib.py'], ignorePatterns: ['*.md'], matchPattern, ...extra });
+
+  test('excludes changed files and ignore-pattern matches', () => {
+    const refs = findReferences(symbols, baseOpts());
+    expect(refs.length).toBeGreaterThan(0);
+    expect(refs.every((r) => r.file !== 'lib.py')).toBe(true);
+    expect(refs.every((r) => r.file !== 'ignored.md')).toBe(true);
+    expect(refs.every((r) => r.file === 'caller.py')).toBe(true);
+  });
+
+  test('per-symbol cap honored', () => {
+    const refs = findReferences(symbols, baseOpts({ perSymbolCap: 5 }));
+    expect(refs.length).toBe(5);
+    expect(refs.map((r) => r.line)).toEqual([1, 2, 3, 4, 5]);
+  });
+
+  test('snippet contains +/-3 context lines and the match line', () => {
+    const refs = findReferences(symbols, baseOpts());
+    const ref = refs.find((r) => r.line === 5);
+    expect(ref).toBeDefined();
+    const lines = ref.snippet.split('\n');
+    expect(lines).toEqual(['x2 = rate_for(2)', 'x3 = rate_for(3)', 'x4 = rate_for(4)', 'x5 = rate_for(5)', 'x6 = rate_for(6)', 'x7 = rate_for(7)', 'x8 = rate_for(8)']);
+  });
+
+  test('symbol cap limits how many symbols are queried', () => {
+    const manySymbols = Array.from({ length: 25 }, (_, i) => ({ name: `sym${i}`, kind: 'function', file: 'lib.py' }));
+    manySymbols.push({ name: 'rate_for', kind: 'function', file: 'lib.py' });
+    // rate_for is symbol #26 (index 25), beyond the default cap of 20, so it
+    // should be dropped and produce no references even though it matches.
+    const refs = findReferences(manySymbols, baseOpts());
+    expect(refs.length).toBe(0);
+  });
+});
+
+describe('buildContextSection', () => {
+  test('returns empty string for no refs', () => {
+    expect(buildContextSection([])).toBe('');
+  });
+
+  test('renders BEGIN/END markers, symbol headers, and file:line', () => {
+    const refs = [
+      { symbol: 'rate_for', file: 'caller.py', line: 4, snippet: 'a\nb\nc' },
+    ];
+    const section = buildContextSection(refs);
+    expect(section).toContain('--- BEGIN CROSS-FILE CONTEXT (UNTRUSTED, read-only) ---');
+    expect(section).toContain('--- END CROSS-FILE CONTEXT ---');
+    expect(section).toContain('### rate_for');
+    expect(section).toContain('caller.py:4');
+  });
+
+  test('char cap drops whole snippets deterministically', () => {
+    const bigSnippet = 'x'.repeat(100);
+    const refs = [
+      { symbol: 'a', file: 'f1.py', line: 1, snippet: bigSnippet },
+      { symbol: 'a', file: 'f2.py', line: 2, snippet: bigSnippet },
+      { symbol: 'b', file: 'f3.py', line: 3, snippet: bigSnippet },
+    ];
+    const section = buildContextSection(refs, { maxChars: 200 });
+    expect(section).toContain('f1.py:1');
+    expect(section).not.toContain('f2.py:2');
+    expect(section).not.toContain('f3.py:3');
+    expect(section).not.toContain('### b');
+    expect(section.length).toBeLessThanOrEqual(200 + 400);
+  });
+});
+
+describe('gatherCodebaseContext', () => {
+  test('never throws and returns empty string for a nonexistent cwd', async () => {
+    const result = await gatherCodebaseContext({
+      files: ['a.py'],
+      diff: '',
+      parseRanges: () => [],
+      ignorePatterns: [],
+      matchPattern,
+      maxChars: 1000,
+      cwd: path.join(os.tmpdir(), 'sherlockqa-does-not-exist-xyz'),
+    });
+    expect(result).toBe('');
   });
 });

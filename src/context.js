@@ -1,5 +1,6 @@
 const path = require('path');
 const fs = require('fs');
+const { execFileSync } = require('child_process');
 const core = require('@actions/core');
 const Parser = require('web-tree-sitter');
 
@@ -181,10 +182,264 @@ function extractSymbolsRegex(filePath, source, changedRanges) {
   return dedupeByName(out);
 }
 
+// --- Reference discovery -------------------------------------------------
+
+// Parses one `git grep -n` output line ("path:lineno:content") into its
+// parts. Uses indexOf rather than split(':') because match content itself
+// may contain colons.
+function parseGrepLine(line) {
+  const firstColon = line.indexOf(':');
+  if (firstColon === -1) return null;
+  const file = line.slice(0, firstColon);
+  const rest = line.slice(firstColon + 1);
+  const secondColon = rest.indexOf(':');
+  if (secondColon === -1) return null;
+  const lineNo = parseInt(rest.slice(0, secondColon), 10);
+  if (Number.isNaN(lineNo)) return null;
+  return { file, line: lineNo };
+}
+
+// Runs `git grep -nw --untracked -e <symbol>` at cwd. Exit code 1 means "no
+// matches" (not an error, per git's convention); any other failure (not a
+// git repo, git missing, etc.) is logged and treated as "no references"
+// rather than propagated, so a single bad symbol can't break the pipeline.
+function grepSymbol(symbolName, cwd) {
+  try {
+    const out = execFileSync('git', ['grep', '-nw', '--untracked', '-e', symbolName], { cwd, encoding: 'utf8' });
+    return out.split('\n').filter(Boolean);
+  } catch (e) {
+    if (e.status === 1) return []; // no matches, not an error
+    core.warning(`git grep failed for symbol "${symbolName}": ${e.message}`);
+    return [];
+  }
+}
+
+function isIgnored(file, ignorePatterns, matchPattern) {
+  if (!ignorePatterns || !matchPattern) return false;
+  return ignorePatterns.some((pattern) => matchPattern(file, pattern));
+}
+
+function sortByFileThenLine(a, b) {
+  return a.file === b.file ? a.line - b.line : a.file.localeCompare(b.file);
+}
+
+// Reads +/-3 lines of context around lineNo (1-indexed) in file, relative to
+// cwd. Returns '' if the file can't be read (deleted/binary/etc.) rather
+// than throwing, so one unreadable hit doesn't drop the whole symbol.
+function readSnippet(cwd, file, lineNo) {
+  try {
+    const content = fs.readFileSync(path.join(cwd, file), 'utf8');
+    const lines = content.split('\n');
+    const start = Math.max(1, lineNo - 3);
+    const end = Math.min(lines.length, lineNo + 3);
+    const out = [];
+    for (let i = start; i <= end; i += 1) out.push(lines[i - 1]);
+    return out.join('\n');
+  } catch (e) {
+    return '';
+  }
+}
+
+// Finds unchanged-code references to `symbols` via `git grep`, dropping hits
+// in changed files, ignore-pattern matches, and the symbol's own definition
+// file, and keeping at most `perSymbolCap` reference sites per symbol (after
+// capping the symbol list itself to `symbolCap`).
+function findReferences(symbols, options = {}) {
+  const {
+    cwd = process.cwd(),
+    changedFiles = [],
+    ignorePatterns = [],
+    matchPattern,
+    perSymbolCap = 5,
+    symbolCap = 20,
+  } = options;
+
+  const changedSet = new Set(changedFiles);
+  const cappedSymbols = symbols.slice(0, symbolCap);
+  const refs = [];
+
+  for (const sym of cappedSymbols) {
+    const lines = grepSymbol(sym.name, cwd);
+    const hits = [];
+
+    for (const rawLine of lines) {
+      const parsed = parseGrepLine(rawLine);
+      if (!parsed) continue;
+      const { file, line } = parsed;
+      if (changedSet.has(file)) continue;
+      if (file === sym.file) continue;
+      if (isIgnored(file, ignorePatterns, matchPattern)) continue;
+      hits.push({ file, line });
+    }
+
+    hits.sort(sortByFileThenLine);
+    const capped = hits.slice(0, perSymbolCap);
+
+    for (const hit of capped) {
+      refs.push({
+        symbol: sym.name,
+        file: hit.file,
+        line: hit.line,
+        snippet: readSnippet(cwd, hit.file, hit.line),
+      });
+    }
+  }
+
+  return refs;
+}
+
+// --- Context section rendering -------------------------------------------
+
+const BEGIN_MARKER = '--- BEGIN CROSS-FILE CONTEXT (UNTRUSTED, read-only) ---';
+const END_MARKER = '--- END CROSS-FILE CONTEXT ---';
+const DESCRIPTION = [
+  'Unchanged code that references symbols this PR modifies. Check these call',
+  'sites for breakage (signature changes, renamed/removed symbols, changed',
+  'return shapes). Do not review this code itself.',
+].join('\n');
+
+// Groups refs by symbol, preserving the order symbols were first seen in
+// (i.e. the priority order findReferences produced them in), and sorts each
+// symbol's own refs by file/line for deterministic rendering.
+function groupBySymbolInOrder(refs) {
+  const order = [];
+  const groups = new Map();
+  for (const ref of refs) {
+    if (!groups.has(ref.symbol)) {
+      groups.set(ref.symbol, []);
+      order.push(ref.symbol);
+    }
+    groups.get(ref.symbol).push(ref);
+  }
+  return order.map((symbol) => ({
+    symbol,
+    refs: groups.get(symbol).slice().sort(sortByFileThenLine),
+  }));
+}
+
+function renderRefBlock(ref) {
+  const indented = ref.snippet.split('\n').map((l) => `    ${l}`).join('\n');
+  return `${ref.file}:${ref.line}\n${indented}\n`;
+}
+
+// Renders refs into the BEGIN/END CROSS-FILE CONTEXT block, capping the
+// rendered symbol/ref content at maxChars. The BEGIN/END markers and
+// description are fixed overhead outside that cap. Drop order is
+// deterministic: symbols in their input (priority) order, refs within a
+// symbol by file/line; once a ref no longer fits, that ref and everything
+// after it (including later symbols) is dropped whole — no partial snippets.
+function buildContextSection(refs, options = {}) {
+  const { maxChars = 10000 } = options;
+  if (!refs || refs.length === 0) return '';
+
+  const groups = groupBySymbolInOrder(refs);
+  let content = '';
+
+  for (const group of groups) {
+    const header = `### ${group.symbol}\n`;
+    let size = header.length;
+    const fittedBlocks = [];
+
+    for (const ref of group.refs) {
+      const block = renderRefBlock(ref);
+      if (content.length + size + block.length > maxChars) break;
+      fittedBlocks.push(block);
+      size += block.length;
+    }
+
+    if (fittedBlocks.length === 0) break; // nothing fit; lower-priority groups won't either
+
+    content += header + fittedBlocks.join('');
+  }
+
+  if (content === '') return '';
+
+  return `${BEGIN_MARKER}\n${DESCRIPTION}\n\n${content}${END_MARKER}`;
+}
+
+// --- Orchestrator ----------------------------------------------------------
+
+function dedupeSymbolsByName(symbols) {
+  const seen = new Set();
+  const out = [];
+  for (const sym of symbols) {
+    if (seen.has(sym.name)) continue;
+    seen.add(sym.name);
+    out.push(sym);
+  }
+  return out;
+}
+
+// Full pipeline: detect a usable checkout, extract changed symbols from each
+// changed file, find cross-file references to them, and render the capped
+// context section. NEVER throws — any failure (missing checkout, bad diff,
+// parse error, git grep failure, etc.) is logged via core.warning and
+// resolves to ''; the feature must never fail a review.
+async function gatherCodebaseContext(options = {}) {
+  try {
+    const {
+      files = [],
+      diff = '',
+      parseRanges,
+      ignorePatterns = [],
+      matchPattern,
+      maxChars = 10000,
+      cwd = process.cwd(),
+    } = options;
+
+    if (!cwd || !fs.existsSync(cwd)) return '';
+
+    try {
+      execFileSync('git', ['rev-parse', '--git-dir'], { cwd, encoding: 'utf8' });
+    } catch (e) {
+      core.warning(`codebase context: no git checkout detected at ${cwd}; skipping`);
+      return '';
+    }
+
+    const allSymbols = [];
+    for (const file of files) {
+      let source;
+      try {
+        source = fs.readFileSync(path.join(cwd, file), 'utf8');
+      } catch (e) {
+        continue; // file not on disk (deleted, renamed, etc.) - skip, not fatal
+      }
+
+      let changedRanges = [];
+      try {
+        changedRanges = (typeof parseRanges === 'function' ? parseRanges(diff, file) : []) || [];
+      } catch (e) {
+        core.warning(`codebase context: failed to parse changed ranges for ${file}: ${e.message}`);
+        continue;
+      }
+      if (changedRanges.length === 0) continue;
+
+      try {
+        const symbols = await extractChangedSymbols(file, source, changedRanges);
+        allSymbols.push(...symbols);
+      } catch (e) {
+        core.warning(`codebase context: symbol extraction failed for ${file}: ${e.message}`);
+      }
+    }
+
+    const symbols = dedupeSymbolsByName(allSymbols);
+    if (symbols.length === 0) return '';
+
+    const refs = findReferences(symbols, { cwd, changedFiles: files, ignorePatterns, matchPattern });
+    return buildContextSection(refs, { maxChars });
+  } catch (e) {
+    core.warning(`codebase context: failed, falling back to diff-only: ${e.message}`);
+    return '';
+  }
+}
+
 module.exports = {
   initParsers,
   extractChangedSymbols,
   extractSymbolsRegex,
+  findReferences,
+  buildContextSection,
+  gatherCodebaseContext,
   // Test-only seams (not part of the documented public interface).
   WASM_FILE_BY_GRAMMAR,
   __resetParsersForTest,
