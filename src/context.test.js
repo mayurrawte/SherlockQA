@@ -97,6 +97,59 @@ describe('extractChangedSymbols (tree-sitter)', () => {
   });
 });
 
+// Pins the built-action (dist/) wasm layout: scripts/copy-wasm.js copies
+// tree-sitter.wasm and the grammar wasm files FLAT into dist/, because
+// @vercel/ncc bundles context.js such that __dirname resolves to dist/
+// itself at runtime (verified during Task 4 - see task-4-report.md). These
+// tests simulate that flat layout against an isolated temp directory (via
+// __setWasmBaseDirOverrideForTest, which replaces the whole candidate list -
+// no node_modules path is ever consulted), so a future refactor that
+// reorders or drops the __dirname candidate in wasmCandidateDirs() fails
+// here instead of silently regressing to regex-only extraction in the built
+// action.
+describe('flat-dist wasm resolution (dist/ layout)', () => {
+  const context = require('./context');
+  let flatDir;
+
+  beforeAll(() => {
+    flatDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sherlockqa-wasm-flat-'));
+    const pythonWasmSrc = path.join(__dirname, '..', 'node_modules', 'tree-sitter-wasms', 'out', 'tree-sitter-python.wasm');
+    fs.copyFileSync(pythonWasmSrc, path.join(flatDir, 'tree-sitter-python.wasm'));
+  });
+
+  afterAll(() => {
+    context.__setWasmBaseDirOverrideForTest(null);
+    context.__resetParsersForTest();
+    fs.rmSync(flatDir, { recursive: true, force: true });
+  });
+
+  afterEach(() => {
+    context.__setWasmBaseDirOverrideForTest(null);
+  });
+
+  test('resolveWasmPath finds a flat-copied wasm file with no node_modules candidate available', () => {
+    context.__setWasmBaseDirOverrideForTest(flatDir);
+    expect(context.resolveWasmPath('python')).toBe(path.join(flatDir, 'tree-sitter-python.wasm'));
+  });
+
+  test('a grammar missing from the flat dir throws (no node_modules fallback leaks through)', () => {
+    context.__setWasmBaseDirOverrideForTest(flatDir);
+    expect(() => context.resolveWasmPath('javascript')).toThrow(/tree-sitter wasm file not found/);
+  });
+
+  test('parses real python via tree-sitter loaded purely from the flat dir (end to end)', async () => {
+    context.__setWasmBaseDirOverrideForTest(flatDir);
+    context.__resetParsersForTest();
+
+    const { p, src } = fx('sample.py');
+    // Same case as "python: changed line inside a method yields method and
+    // class" above; only a real tree-sitter parse (not the regex fallback)
+    // yields both 'total' and 'Quote' for this changed range.
+    const names = (await context.extractChangedSymbols(p, src, [{ start: 9, end: 9 }])).map(s => s.name);
+    expect(names).toEqual(expect.arrayContaining(['total', 'Quote']));
+  });
+});
+
 describe('extractSymbolsRegex fallback', () => {
   test('finds def/function/class/func/fn on changed lines', () => {
     const src = 'fn main() {\n}\nclass Foo:\n';

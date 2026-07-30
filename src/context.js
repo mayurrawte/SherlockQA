@@ -42,7 +42,15 @@ const WASM_FILE_BY_GRAMMAR = {
 // The `node_modules/tree-sitter-wasms/out` variants exist for src/test (dev)
 // runs, where context.js runs from src/ and node_modules lives at the repo
 // root (one level up).
+// Test-only override: when set, wasmCandidateDirs() returns *only* this
+// directory (no node_modules fallbacks at all), so tests can simulate the
+// flat-dist layout in isolation - proving resolution works from a bare
+// directory of wasm files, not merely because a node_modules candidate also
+// happens to be reachable. See __setWasmBaseDirOverrideForTest below.
+let wasmBaseDirOverride = null;
+
 function wasmCandidateDirs() {
+  if (wasmBaseDirOverride) return [wasmBaseDirOverride];
   return [
     __dirname,
     path.join(__dirname, 'node_modules', 'tree-sitter-wasms', 'out'),
@@ -102,6 +110,16 @@ async function initParsers() {
 function __resetParsersForTest() {
   parsers = null;
   initPromise = null;
+}
+
+// Test-only seam: forces wasmCandidateDirs() to return only `dir` (or, when
+// called with a falsy value, restores the normal __dirname-relative
+// candidate list). Lets tests simulate the flat-dist runtime layout (see
+// scripts/copy-wasm.js) against an arbitrary temp directory, without any
+// node_modules candidate being reachable as a fallback. Not part of the
+// documented public interface.
+function __setWasmBaseDirOverrideForTest(dir) {
+  wasmBaseDirOverride = dir || null;
 }
 
 function overlaps(node, ranges) {
@@ -515,5 +533,7 @@ module.exports = {
   gatherCodebaseContext,
   // Test-only seams (not part of the documented public interface).
   WASM_FILE_BY_GRAMMAR,
+  resolveWasmPath,
   __resetParsersForTest,
+  __setWasmBaseDirOverrideForTest,
 };
