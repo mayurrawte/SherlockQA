@@ -12,6 +12,23 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) an
 - `/sherlock` slash commands (`review-again`, `explain`, `ignore`, `approve`)
 - See [ROADMAP.md](ROADMAP.md) for full plan.
 
+## [1.3.0]
+
+### Added
+- **AWS Bedrock provider** ([#26](https://github.com/mayurrawte/SherlockQA/pull/26)) — `ai-provider: bedrock` calls the model-agnostic Converse API with a Bedrock API key (Bearer token) over plain fetch; new `bedrock-api-key` and `aws-region` inputs; default model `anthropic.claude-sonnet-5`. Any Converse-compatible model ID works (Claude, Llama, Mistral, Nova). IAM-role/SigV4 auth is not supported.
+- **Review noise budget** ([#27](https://github.com/mayurrawte/SherlockQA/pull/27)) — new `max-comments` input (default 5, `0` = unlimited) caps inline comments, ranked by severity then confidence; overflow collapses into a "Minor notes" block.
+- **Confidence filtering** ([#27](https://github.com/mayurrawte/SherlockQA/pull/27)) — the model reports a `confidence` per finding; new `min-confidence` input (default 0.6) drops findings the model isn't sure about. Findings without a confidence value bypass the filter, so providers that don't emit the field keep working unchanged.
+- Cost estimation for Bedrock Claude IDs (`anthropic.` / `us.` / `eu.` / `apac.` / `global.` prefixes) and pricing rows for `claude-sonnet-5` / `claude-opus-5`.
+
+### Changed
+- **Cleaner review output** — clean approvals render as a single verdict line; the compact style suppresses QA scenarios and questions on approvals (`review-style: detailed` keeps them); suggestion-severity findings render in the collapsed "Minor notes" block instead of inline comments (when `min-severity: suggestion`).
+- **Higher-signal prompt** — findings are limited to issues causing incorrect behavior, test failures, data loss, or security vulnerabilities; comments follow a problem → consequence → fix format in at most 2 sentences, with no diff narration or filler praise.
+- Severity normalization is now case-insensitive (`"ERROR"` → `error`); previously non-lowercase severities collapsed to `suggestion`.
+- Invalid `min-confidence` / `max-comments` values fall back to their defaults with a workflow warning instead of silently dropping findings.
+
+### Internal
+- Jest suite grown to 97 tests; new exported helpers `callBedrock`, `defaultModelFor`, `normalizeConfidence`, `filterAndRouteComments`.
+
 ## [1.2.3]
 
 ### Fixed

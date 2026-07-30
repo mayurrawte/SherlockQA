@@ -65,6 +65,17 @@ Three pillars:
 
 ---
 
+## v1.3 — Reach + signal ✅ *(shipped)*
+
+- [x] AWS Bedrock provider (Converse API, Bearer auth — any Converse-compatible model)
+- [x] Noise budget: `max-comments` cap with severity/confidence ranking
+- [x] Per-finding confidence + `min-confidence` filter (backward-compatible bypass)
+- [x] "Minor notes" consolidation for suggestion-severity findings
+- [x] Silent-on-clean approvals; QA/questions suppressed on approvals (compact style)
+- [x] High-signal prompt: concrete flag bar, problem → consequence → fix format
+
+---
+
 ## v1.2 — Conversational reviews *(partial, in progress)*
 
 > Make the review *interactive*, not a one-shot drop-and-leave.
