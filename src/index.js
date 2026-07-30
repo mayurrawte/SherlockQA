@@ -322,7 +322,9 @@ function loadRepoConfig() {
 function defaultModelFor(provider) {
   switch (provider) {
     case 'anthropic': return 'claude-sonnet-4-5';
-    case 'bedrock': return 'anthropic.claude-sonnet-5';
+    // Inference-profile form: newer Claude models on Bedrock reject the bare
+    // anthropic. ID with "on-demand throughput isn't supported" (verified live).
+    case 'bedrock': return 'us.anthropic.claude-sonnet-5';
     case 'gemini': return 'gemini-2.0-flash';
     case 'ollama': return 'llama3.1';
     case 'azure':

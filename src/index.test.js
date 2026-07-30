@@ -744,7 +744,7 @@ describe('callBedrock (Converse API, Bearer auth)', () => {
 
 describe('bedrock provider wiring', () => {
   test('defaultModelFor(bedrock) is the prefixed Bedrock Claude id', () => {
-    expect(defaultModelFor('bedrock')).toBe('anthropic.claude-sonnet-5');
+    expect(defaultModelFor('bedrock')).toBe('us.anthropic.claude-sonnet-5');
   });
 });
 
