@@ -48,6 +48,33 @@ describe('extractChangedSymbols (tree-sitter)', () => {
     const syms = await extractChangedSymbols(p, src, [{ start: 1, end: 1 }]);
     expect(syms.map(s => s.name)).toContain('main');
   });
+
+  test('one grammar failing to load falls back to regex for that language only, without poisoning others', async () => {
+    const context = require('./context');
+    context.__resetParsersForTest();
+    const originalPythonWasm = context.WASM_FILE_BY_GRAMMAR.python;
+    context.WASM_FILE_BY_GRAMMAR.python = 'tree-sitter-does-not-exist.wasm';
+
+    try {
+      // Python: the method-in-class case only yields ['total', 'Quote'] via a
+      // real tree-sitter parse (both nodes overlap the changed range). The
+      // regex fallback only scans the literal changed line ("return self.amount"),
+      // which matches neither pattern, so an empty result proves the regex
+      // path ran instead of tree-sitter for python specifically.
+      const { p: pyPath, src: pySrc } = fx('sample.py');
+      const pySyms = await extractChangedSymbols(pyPath, pySrc, [{ start: 9, end: 9 }]);
+      expect(pySyms).toEqual([]);
+
+      // Other grammars (javascript here) must still parse via tree-sitter,
+      // unaffected by python's load failure.
+      const { p: jsPath, src: jsSrc } = fx('sample.js');
+      const jsSyms = await extractChangedSymbols(jsPath, jsSrc, [{ start: 8, end: 9 }]);
+      expect(jsSyms.map(s => s.name)).toEqual(expect.arrayContaining(['open', 'Box']));
+    } finally {
+      context.WASM_FILE_BY_GRAMMAR.python = originalPythonWasm;
+      context.__resetParsersForTest();
+    }
+  });
 });
 
 describe('extractSymbolsRegex fallback', () => {

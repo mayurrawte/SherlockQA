@@ -51,7 +51,7 @@ function resolveWasmPath(grammar) {
   return require.resolve(`tree-sitter-wasms/out/${fileName}`);
 }
 
-let parsers = null; // lazy: { [grammar]: Parser instance }
+let parsers = null; // lazy: { [grammar]: Parser instance }, missing key => that grammar failed to load
 let initPromise = null;
 
 async function initParsers() {
@@ -61,16 +61,30 @@ async function initParsers() {
     await Parser.init();
     const loaded = {};
     for (const grammar of Object.keys(WASM_FILE_BY_GRAMMAR)) {
-      const wasmPath = resolveWasmPath(grammar);
-      const language = await Parser.Language.load(wasmPath);
-      const parser = new Parser();
-      parser.setLanguage(language);
-      loaded[grammar] = parser;
+      // Isolate failures per grammar: one bad/missing wasm file must not
+      // poison the others or permanently wedge the cached init promise.
+      try {
+        const wasmPath = resolveWasmPath(grammar);
+        const language = await Parser.Language.load(wasmPath);
+        const parser = new Parser();
+        parser.setLanguage(language);
+        loaded[grammar] = parser;
+      } catch (e) {
+        core.warning(`tree-sitter: failed to load grammar "${grammar}": ${e.message}; falling back to regex for this language`);
+      }
     }
     parsers = loaded;
     return parsers;
   })();
   return initPromise;
+}
+
+// Test-only seam: clears the module-level parser cache so tests can force a
+// fresh initParsers() run (e.g. after mutating WASM_FILE_BY_GRAMMAR to
+// simulate a grammar load failure). Not part of the documented interface.
+function __resetParsersForTest() {
+  parsers = null;
+  initPromise = null;
 }
 
 function overlaps(node, ranges) {
@@ -171,4 +185,7 @@ module.exports = {
   initParsers,
   extractChangedSymbols,
   extractSymbolsRegex,
+  // Test-only seams (not part of the documented public interface).
+  WASM_FILE_BY_GRAMMAR,
+  __resetParsersForTest,
 };
