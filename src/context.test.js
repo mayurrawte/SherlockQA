@@ -5,6 +5,7 @@ const { execFileSync } = require('child_process');
 const {
   extractChangedSymbols,
   extractSymbolsRegex,
+  extractDeletedSymbols,
   findReferences,
   buildContextSection,
   gatherCodebaseContext,
@@ -150,6 +151,50 @@ describe('flat-dist wasm resolution (dist/ layout)', () => {
   });
 });
 
+describe('extractDeletedSymbols (spec step 2)', () => {
+  test('finds a function deleted entirely from a file', () => {
+    const diff = [
+      'diff --git a/helpers.js b/helpers.js',
+      'deleted file mode 100644',
+      '--- a/helpers.js',
+      '+++ /dev/null',
+      '@@ -1,3 +0,0 @@',
+      '-function oldHelper(x) {',
+      '-  return x * 2;',
+      '-}',
+    ].join('\n');
+    const syms = extractDeletedSymbols(diff, 'helpers.js');
+    expect(syms).toEqual([{ name: 'oldHelper', kind: 'deleted', file: 'helpers.js', changedLines: 1 }]);
+  });
+
+  test('finds a function deleted from within an otherwise-modified file', () => {
+    const diff = [
+      'diff --git a/mod.js b/mod.js',
+      '--- a/mod.js',
+      '+++ b/mod.js',
+      '@@ -1,4 +1,2 @@',
+      '-function oldFn() {',
+      '-  return 1;',
+      '-}',
+      '+function newFn() { return 2; }',
+    ].join('\n');
+    const syms = extractDeletedSymbols(diff, 'mod.js');
+    expect(syms.map((s) => s.name)).toEqual(['oldFn']);
+    expect(syms[0].kind).toBe('deleted');
+  });
+
+  test('ignores deletions in other files and returns [] when nothing matches', () => {
+    const diff = [
+      'diff --git a/other.js b/other.js',
+      '--- a/other.js',
+      '+++ /dev/null',
+      '@@ -1,1 +0,0 @@',
+      '-function gone() {}',
+    ].join('\n');
+    expect(extractDeletedSymbols(diff, 'mod.js')).toEqual([]);
+  });
+});
+
 describe('extractSymbolsRegex fallback', () => {
   test('finds def/function/class/func/fn on changed lines', () => {
     const src = 'fn main() {\n}\nclass Foo:\n';
@@ -268,6 +313,16 @@ describe('buildContextSection', () => {
     expect(section).toContain('f2.py:2');
     expect(section).not.toContain('### a');
     expect(section).not.toContain('f1.py:1');
+  });
+
+  test('header reads "(changed in <file>)" for a changed symbol and "(deleted from <file>)" for a deleted one', () => {
+    const refs = [
+      { symbol: 'foo', kind: 'function', symbolFile: 'a.js', file: 'caller.js', line: 1, snippet: 'x' },
+      { symbol: 'bar', kind: 'deleted', symbolFile: 'b.js', file: 'caller2.js', line: 2, snippet: 'y' },
+    ];
+    const section = buildContextSection(refs);
+    expect(section).toContain('### foo (changed in a.js)');
+    expect(section).toContain('### bar (deleted from b.js)');
   });
 
   test('an oversized group does not starve a smaller later group (I-B)', () => {

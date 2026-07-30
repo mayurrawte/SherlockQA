@@ -40005,6 +40005,39 @@ function extractSymbolsRegex(filePath, source, changedRanges) {
   return dedupeByName(out);
 }
 
+// Scans a unified diff for `file`'s deleted ("-") lines and matches them
+// against DEF_REGEX (the same pattern extractSymbolsRegex uses) to find
+// symbols removed entirely by this PR (spec step 2). This runs against the
+// diff text itself rather than a parsed source tree, because deleted code no
+// longer exists on disk to tree-sitter-parse - regex over the "-" lines is
+// the only source of truth available. changedLines counts how many deleted
+// lines matched a definition for that name, so deleted symbols compete for
+// priority/caps on equal footing with changed ones (see sortSymbolsByPriority).
+function extractDeletedSymbols(diffText, file) {
+  const out = [];
+  let currentFile = null;
+  for (const line of diffText.split('\n')) {
+    if (line.startsWith('diff --git ')) {
+      currentFile = null;
+      continue;
+    }
+    if (!currentFile) {
+      // "--- a/<path>" identifies the pre-image file whose "-" lines we scan;
+      // present for modified AND fully-deleted files alike (deleted files
+      // additionally have "+++ /dev/null", which we don't need here).
+      if (line.startsWith('--- a/')) currentFile = line.slice(6);
+      continue;
+    }
+    if (currentFile !== file) continue;
+    if (!line.startsWith('-') || line.startsWith('---')) continue;
+    const match = DEF_REGEX.exec(line.slice(1));
+    if (match) {
+      out.push({ name: match[1], kind: 'deleted', file, changedLines: 1 });
+    }
+  }
+  return dedupeByName(out);
+}
+
 // --- Reference discovery -------------------------------------------------
 
 // Parses one `git grep -n` output line ("path:lineno:content") into its
@@ -40101,6 +40134,8 @@ function findReferences(symbols, options = {}) {
     for (const hit of capped) {
       refs.push({
         symbol: sym.name,
+        kind: sym.kind,
+        symbolFile: sym.file,
         file: hit.file,
         line: hit.line,
         snippet: readSnippet(cwd, hit.file, hit.line),
@@ -40141,15 +40176,33 @@ function groupBySymbolInOrder(refs) {
   const grouped = order.map((symbol, index) => {
     const symRefs = groups.get(symbol);
     const changedLines = Math.max(0, ...symRefs.map((r) => r.changedLines || 0));
+    // kind/symbolFile are properties of the *symbol*, not the individual
+    // reference site, so every ref in the group carries the same value here -
+    // take the first one seen. Absent for refs built by hand (e.g. older
+    // tests / callers that don't pass them), which keeps the header untagged.
+    const kind = symRefs[0]?.kind;
+    const symbolFile = symRefs[0]?.symbolFile;
     return {
       symbol,
       refs: symRefs.slice().sort(sortByFileThenLine),
       changedLines,
+      kind,
+      symbolFile,
       index,
     };
   });
   grouped.sort((a, b) => (b.changedLines - a.changedLines) || (a.index - b.index));
   return grouped;
+}
+
+// "### <name> (deleted from <file>)" for a symbol removed by this PR, or
+// "### <name> (changed in <file>)" for one that still exists but was
+// modified - falls back to a bare "### <name>" when the symbol's own file
+// isn't known (e.g. refs built without kind/symbolFile).
+function renderGroupHeader(group) {
+  if (!group.symbolFile) return `### ${group.symbol}\n`;
+  const verb = group.kind === 'deleted' ? 'deleted from' : 'changed in';
+  return `### ${group.symbol} (${verb} ${group.symbolFile})\n`;
 }
 
 function renderRefBlock(ref) {
@@ -40173,7 +40226,7 @@ function buildContextSection(refs, options = {}) {
   let content = '';
 
   for (const group of groups) {
-    const header = `### ${group.symbol}\n`;
+    const header = renderGroupHeader(group);
     let size = header.length;
     const fittedBlocks = [];
 
@@ -40254,27 +40307,45 @@ async function gatherCodebaseContext(options = {}) {
 
     const allSymbols = [];
     for (const file of files) {
-      let source;
+      // A fully-deleted file has no on-disk source to read or parse - that's
+      // fine, it just means the "changed" (still-existing-code) extraction
+      // path below has nothing to do for it. The "deleted" path further down
+      // works entirely off the diff text, so it still runs for such files.
+      let source = null;
       try {
         source = fs.readFileSync(path.join(cwd, file), 'utf8');
       } catch (e) {
-        continue; // file not on disk (deleted, renamed, etc.) - skip, not fatal
+        source = null; // file not on disk (deleted, renamed, etc.)
       }
 
-      let changedRanges = [];
-      try {
-        changedRanges = (typeof parseRanges === 'function' ? parseRanges(diff, file) : []) || [];
-      } catch (e) {
-        core.warning(`codebase context: failed to parse changed ranges for ${file}: ${e.message}`);
-        continue;
-      }
-      if (changedRanges.length === 0) continue;
+      if (source !== null) {
+        let changedRanges = [];
+        try {
+          changedRanges = (typeof parseRanges === 'function' ? parseRanges(diff, file) : []) || [];
+        } catch (e) {
+          core.warning(`codebase context: failed to parse changed ranges for ${file}: ${e.message}`);
+          changedRanges = [];
+        }
 
+        if (changedRanges.length > 0) {
+          try {
+            const symbols = await extractChangedSymbols(file, source, changedRanges);
+            allSymbols.push(...symbols);
+          } catch (e) {
+            core.warning(`codebase context: symbol extraction failed for ${file}: ${e.message}`);
+          }
+        }
+      }
+
+      // Deleted-symbol extraction (spec step 2): scans the diff's own "-"
+      // lines for definitions removed by this PR. Independent of whether the
+      // file still exists on disk or had any surviving changed ranges, so a
+      // PR that deletes a function still produces context for it.
       try {
-        const symbols = await extractChangedSymbols(file, source, changedRanges);
-        allSymbols.push(...symbols);
+        const deletedSymbols = extractDeletedSymbols(diff, file);
+        allSymbols.push(...deletedSymbols);
       } catch (e) {
-        core.warning(`codebase context: symbol extraction failed for ${file}: ${e.message}`);
+        core.warning(`codebase context: deleted-symbol extraction failed for ${file}: ${e.message}`);
       }
     }
 
@@ -40293,6 +40364,7 @@ module.exports = {
   initParsers,
   extractChangedSymbols,
   extractSymbolsRegex,
+  extractDeletedSymbols,
   findReferences,
   buildContextSection,
   gatherCodebaseContext,
@@ -40312,6 +40384,7 @@ module.exports = {
 /* module decorator */ module = __nccwpck_require__.nmd(module);
 const fs = __nccwpck_require__(9896);
 const path = __nccwpck_require__(6928);
+const { execFileSync } = __nccwpck_require__(5317);
 const core = __nccwpck_require__(7484);
 const github = __nccwpck_require__(3228);
 const OpenAI = __nccwpck_require__(2583);
@@ -40432,6 +40505,25 @@ function makeInputResolver(repoConfig) {
   };
 }
 
+// Verifies the workspace checkout is actually at the PR's head commit before
+// trusting it for codebase-context extraction (Important #1). Without this,
+// a workflow that checks out `main` (or forgot `ref:` entirely) would silently
+// feed stale/wrong-branch source into symbol extraction and git-grep, and the
+// resulting "cross-file context" would be actively misleading rather than
+// merely absent. Accepts either the PR's head sha or its merge_commit_sha
+// (GitHub Actions checkouts commonly land on one or the other depending on
+// the event/ref used) - either may be null/undefined, which never matches.
+// Never throws: any git failure (not a repo, git missing, detached weirdness)
+// degrades to "no match", same as no checkout at all.
+function checkoutMatchesPr(workspace, headSha, mergeSha) {
+  try {
+    const actual = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: workspace, encoding: 'utf8' }).trim();
+    return (!!headSha && actual === headSha) || (!!mergeSha && actual === mergeSha);
+  } catch (e) {
+    return false;
+  }
+}
+
 async function run() {
   try {
     // Load .sherlockqa.yml from the workspace if present. Action inputs always win.
@@ -40494,8 +40586,8 @@ async function run() {
       mediaType: { format: 'diff' }
     });
 
-    const { data: files } = await octokit.rest.pulls.listFiles({
-      owner, repo, pull_number: prNumber
+    const files = await octokit.paginate(octokit.rest.pulls.listFiles, {
+      owner, repo, pull_number: prNumber, per_page: 100
     });
 
     const filesToReview = files.filter(file =>
@@ -40513,20 +40605,33 @@ async function run() {
     if (codebaseContext !== 'false') {
       const workspace = process.env.GITHUB_WORKSPACE || process.cwd();
       const hasCheckout = fs.existsSync(path.join(workspace, '.git'));
-      if (hasCheckout) {
-        contextSection = await gatherCodebaseContext({
-          files: filesToReview.map(f => f.filename),
-          diff,
-          parseRanges: parseChangedRangesForFile,
-          ignorePatterns,
-          matchPattern,
-          maxChars: contextMaxChars,
-          cwd: workspace,
-        });
-      } else if (codebaseContext === 'true') {
-        core.warning('codebase-context is enabled but no git checkout was detected (run actions/checkout before this action); falling back to diff-only review.');
+      if (!hasCheckout) {
+        if (codebaseContext === 'true') {
+          core.warning('codebase-context is enabled but no git checkout was detected (run actions/checkout before this action); falling back to diff-only review.');
+        } else {
+          core.info('codebase-context: no git checkout detected; skipping (auto mode).');
+        }
       } else {
-        core.info('codebase-context: no git checkout detected; skipping (auto mode).');
+        const headSha = context.payload.pull_request?.head?.sha || null;
+        const mergeSha = context.payload.pull_request?.merge_commit_sha || null;
+        const isPrHead = checkoutMatchesPr(workspace, headSha, mergeSha);
+        if (!isPrHead) {
+          if (codebaseContext === 'true') {
+            core.warning('codebase-context is enabled but the checked-out commit does not match the PR head or merge commit (checkout out of date, or ref not set to the PR head); falling back to diff-only review.');
+          } else {
+            core.info('codebase-context: checked-out commit does not match the PR head; skipping (auto mode).');
+          }
+        } else {
+          contextSection = await gatherCodebaseContext({
+            files: filesToReview.map(f => f.filename),
+            diff,
+            parseRanges: parseChangedRangesForFile,
+            ignorePatterns,
+            matchPattern,
+            maxChars: contextMaxChars,
+            cwd: workspace,
+          });
+        }
       }
     }
 
@@ -41786,6 +41891,7 @@ module.exports = {
   callOllama,
   callBedrock,
   defaultModelFor,
+  checkoutMatchesPr,
 };
 
 

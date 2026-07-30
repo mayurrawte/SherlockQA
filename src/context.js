@@ -240,6 +240,39 @@ function extractSymbolsRegex(filePath, source, changedRanges) {
   return dedupeByName(out);
 }
 
+// Scans a unified diff for `file`'s deleted ("-") lines and matches them
+// against DEF_REGEX (the same pattern extractSymbolsRegex uses) to find
+// symbols removed entirely by this PR (spec step 2). This runs against the
+// diff text itself rather than a parsed source tree, because deleted code no
+// longer exists on disk to tree-sitter-parse - regex over the "-" lines is
+// the only source of truth available. changedLines counts how many deleted
+// lines matched a definition for that name, so deleted symbols compete for
+// priority/caps on equal footing with changed ones (see sortSymbolsByPriority).
+function extractDeletedSymbols(diffText, file) {
+  const out = [];
+  let currentFile = null;
+  for (const line of diffText.split('\n')) {
+    if (line.startsWith('diff --git ')) {
+      currentFile = null;
+      continue;
+    }
+    if (!currentFile) {
+      // "--- a/<path>" identifies the pre-image file whose "-" lines we scan;
+      // present for modified AND fully-deleted files alike (deleted files
+      // additionally have "+++ /dev/null", which we don't need here).
+      if (line.startsWith('--- a/')) currentFile = line.slice(6);
+      continue;
+    }
+    if (currentFile !== file) continue;
+    if (!line.startsWith('-') || line.startsWith('---')) continue;
+    const match = DEF_REGEX.exec(line.slice(1));
+    if (match) {
+      out.push({ name: match[1], kind: 'deleted', file, changedLines: 1 });
+    }
+  }
+  return dedupeByName(out);
+}
+
 // --- Reference discovery -------------------------------------------------
 
 // Parses one `git grep -n` output line ("path:lineno:content") into its
@@ -336,6 +369,8 @@ function findReferences(symbols, options = {}) {
     for (const hit of capped) {
       refs.push({
         symbol: sym.name,
+        kind: sym.kind,
+        symbolFile: sym.file,
         file: hit.file,
         line: hit.line,
         snippet: readSnippet(cwd, hit.file, hit.line),
@@ -376,15 +411,33 @@ function groupBySymbolInOrder(refs) {
   const grouped = order.map((symbol, index) => {
     const symRefs = groups.get(symbol);
     const changedLines = Math.max(0, ...symRefs.map((r) => r.changedLines || 0));
+    // kind/symbolFile are properties of the *symbol*, not the individual
+    // reference site, so every ref in the group carries the same value here -
+    // take the first one seen. Absent for refs built by hand (e.g. older
+    // tests / callers that don't pass them), which keeps the header untagged.
+    const kind = symRefs[0]?.kind;
+    const symbolFile = symRefs[0]?.symbolFile;
     return {
       symbol,
       refs: symRefs.slice().sort(sortByFileThenLine),
       changedLines,
+      kind,
+      symbolFile,
       index,
     };
   });
   grouped.sort((a, b) => (b.changedLines - a.changedLines) || (a.index - b.index));
   return grouped;
+}
+
+// "### <name> (deleted from <file>)" for a symbol removed by this PR, or
+// "### <name> (changed in <file>)" for one that still exists but was
+// modified - falls back to a bare "### <name>" when the symbol's own file
+// isn't known (e.g. refs built without kind/symbolFile).
+function renderGroupHeader(group) {
+  if (!group.symbolFile) return `### ${group.symbol}\n`;
+  const verb = group.kind === 'deleted' ? 'deleted from' : 'changed in';
+  return `### ${group.symbol} (${verb} ${group.symbolFile})\n`;
 }
 
 function renderRefBlock(ref) {
@@ -408,7 +461,7 @@ function buildContextSection(refs, options = {}) {
   let content = '';
 
   for (const group of groups) {
-    const header = `### ${group.symbol}\n`;
+    const header = renderGroupHeader(group);
     let size = header.length;
     const fittedBlocks = [];
 
@@ -489,27 +542,45 @@ async function gatherCodebaseContext(options = {}) {
 
     const allSymbols = [];
     for (const file of files) {
-      let source;
+      // A fully-deleted file has no on-disk source to read or parse - that's
+      // fine, it just means the "changed" (still-existing-code) extraction
+      // path below has nothing to do for it. The "deleted" path further down
+      // works entirely off the diff text, so it still runs for such files.
+      let source = null;
       try {
         source = fs.readFileSync(path.join(cwd, file), 'utf8');
       } catch (e) {
-        continue; // file not on disk (deleted, renamed, etc.) - skip, not fatal
+        source = null; // file not on disk (deleted, renamed, etc.)
       }
 
-      let changedRanges = [];
-      try {
-        changedRanges = (typeof parseRanges === 'function' ? parseRanges(diff, file) : []) || [];
-      } catch (e) {
-        core.warning(`codebase context: failed to parse changed ranges for ${file}: ${e.message}`);
-        continue;
-      }
-      if (changedRanges.length === 0) continue;
+      if (source !== null) {
+        let changedRanges = [];
+        try {
+          changedRanges = (typeof parseRanges === 'function' ? parseRanges(diff, file) : []) || [];
+        } catch (e) {
+          core.warning(`codebase context: failed to parse changed ranges for ${file}: ${e.message}`);
+          changedRanges = [];
+        }
 
+        if (changedRanges.length > 0) {
+          try {
+            const symbols = await extractChangedSymbols(file, source, changedRanges);
+            allSymbols.push(...symbols);
+          } catch (e) {
+            core.warning(`codebase context: symbol extraction failed for ${file}: ${e.message}`);
+          }
+        }
+      }
+
+      // Deleted-symbol extraction (spec step 2): scans the diff's own "-"
+      // lines for definitions removed by this PR. Independent of whether the
+      // file still exists on disk or had any surviving changed ranges, so a
+      // PR that deletes a function still produces context for it.
       try {
-        const symbols = await extractChangedSymbols(file, source, changedRanges);
-        allSymbols.push(...symbols);
+        const deletedSymbols = extractDeletedSymbols(diff, file);
+        allSymbols.push(...deletedSymbols);
       } catch (e) {
-        core.warning(`codebase context: symbol extraction failed for ${file}: ${e.message}`);
+        core.warning(`codebase context: deleted-symbol extraction failed for ${file}: ${e.message}`);
       }
     }
 
@@ -528,6 +599,7 @@ module.exports = {
   initParsers,
   extractChangedSymbols,
   extractSymbolsRegex,
+  extractDeletedSymbols,
   findReferences,
   buildContextSection,
   gatherCodebaseContext,

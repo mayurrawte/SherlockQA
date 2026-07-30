@@ -1,5 +1,6 @@
 const fs = require('fs');
 const path = require('path');
+const { execFileSync } = require('child_process');
 const core = require('@actions/core');
 const github = require('@actions/github');
 const OpenAI = require('openai');
@@ -120,6 +121,25 @@ function makeInputResolver(repoConfig) {
   };
 }
 
+// Verifies the workspace checkout is actually at the PR's head commit before
+// trusting it for codebase-context extraction (Important #1). Without this,
+// a workflow that checks out `main` (or forgot `ref:` entirely) would silently
+// feed stale/wrong-branch source into symbol extraction and git-grep, and the
+// resulting "cross-file context" would be actively misleading rather than
+// merely absent. Accepts either the PR's head sha or its merge_commit_sha
+// (GitHub Actions checkouts commonly land on one or the other depending on
+// the event/ref used) - either may be null/undefined, which never matches.
+// Never throws: any git failure (not a repo, git missing, detached weirdness)
+// degrades to "no match", same as no checkout at all.
+function checkoutMatchesPr(workspace, headSha, mergeSha) {
+  try {
+    const actual = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: workspace, encoding: 'utf8' }).trim();
+    return (!!headSha && actual === headSha) || (!!mergeSha && actual === mergeSha);
+  } catch (e) {
+    return false;
+  }
+}
+
 async function run() {
   try {
     // Load .sherlockqa.yml from the workspace if present. Action inputs always win.
@@ -182,8 +202,8 @@ async function run() {
       mediaType: { format: 'diff' }
     });
 
-    const { data: files } = await octokit.rest.pulls.listFiles({
-      owner, repo, pull_number: prNumber
+    const files = await octokit.paginate(octokit.rest.pulls.listFiles, {
+      owner, repo, pull_number: prNumber, per_page: 100
     });
 
     const filesToReview = files.filter(file =>
@@ -201,20 +221,33 @@ async function run() {
     if (codebaseContext !== 'false') {
       const workspace = process.env.GITHUB_WORKSPACE || process.cwd();
       const hasCheckout = fs.existsSync(path.join(workspace, '.git'));
-      if (hasCheckout) {
-        contextSection = await gatherCodebaseContext({
-          files: filesToReview.map(f => f.filename),
-          diff,
-          parseRanges: parseChangedRangesForFile,
-          ignorePatterns,
-          matchPattern,
-          maxChars: contextMaxChars,
-          cwd: workspace,
-        });
-      } else if (codebaseContext === 'true') {
-        core.warning('codebase-context is enabled but no git checkout was detected (run actions/checkout before this action); falling back to diff-only review.');
+      if (!hasCheckout) {
+        if (codebaseContext === 'true') {
+          core.warning('codebase-context is enabled but no git checkout was detected (run actions/checkout before this action); falling back to diff-only review.');
+        } else {
+          core.info('codebase-context: no git checkout detected; skipping (auto mode).');
+        }
       } else {
-        core.info('codebase-context: no git checkout detected; skipping (auto mode).');
+        const headSha = context.payload.pull_request?.head?.sha || null;
+        const mergeSha = context.payload.pull_request?.merge_commit_sha || null;
+        const isPrHead = checkoutMatchesPr(workspace, headSha, mergeSha);
+        if (!isPrHead) {
+          if (codebaseContext === 'true') {
+            core.warning('codebase-context is enabled but the checked-out commit does not match the PR head or merge commit (checkout out of date, or ref not set to the PR head); falling back to diff-only review.');
+          } else {
+            core.info('codebase-context: checked-out commit does not match the PR head; skipping (auto mode).');
+          }
+        } else {
+          contextSection = await gatherCodebaseContext({
+            files: filesToReview.map(f => f.filename),
+            diff,
+            parseRanges: parseChangedRangesForFile,
+            ignorePatterns,
+            matchPattern,
+            maxChars: contextMaxChars,
+            cwd: workspace,
+          });
+        }
       }
     }
 
@@ -1474,4 +1507,5 @@ module.exports = {
   callOllama,
   callBedrock,
   defaultModelFor,
+  checkoutMatchesPr,
 };

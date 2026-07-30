@@ -39,6 +39,23 @@ const GRAMMAR_WASM_FILES = [
 
 const CORE_WASM_FILE = 'tree-sitter.wasm';
 
+// Tripwire: dist/ should only ever hold the bundled index.js plus the 7 wasm
+// files copied above (a few MB total). If ncc's static analyzer regresses and
+// starts bundling the full tree-sitter-wasms/out directory again (~49MB of
+// unused grammars — see the dist/out cleanup below), that must fail the build
+// loudly instead of silently shipping a bloated action.
+const MAX_DIST_BYTES = 15 * 1024 * 1024;
+
+function dirSizeBytes(dir) {
+  let total = 0;
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) total += dirSizeBytes(full);
+    else if (entry.isFile()) total += fs.statSync(full).size;
+  }
+  return total;
+}
+
 function copyFileOrFail(srcPath, destPath) {
   if (!fs.existsSync(srcPath)) {
     console.error(`copy-wasm: missing required wasm file: ${srcPath}`);
@@ -81,7 +98,14 @@ function main() {
     console.log(`copy-wasm: removed unused ncc-bundled asset dir ${path.relative(REPO_ROOT, nccAutoAssetDir)}`);
   }
 
-  console.log('copy-wasm: done (7 wasm files copied flat into dist/)');
+  const distSizeBytes = dirSizeBytes(DIST_DIR);
+  const distSizeMb = (distSizeBytes / (1024 * 1024)).toFixed(2);
+  if (distSizeBytes > MAX_DIST_BYTES) {
+    console.error(`copy-wasm: dist/ is ${distSizeMb}MB, exceeding the 15MB tripwire. This usually means ncc re-bundled the full tree-sitter-wasms grammar directory (~49MB) instead of just the 7 files this script copies — check that dist/out/ was actually removed above and that no new dynamic require.resolve()/fs path probing was added in src/context.js that would make ncc bundle assets conservatively.`);
+    process.exit(1);
+  }
+
+  console.log(`copy-wasm: done (7 wasm files copied flat into dist/, total dist/ size ${distSizeMb}MB)`);
 }
 
 main();

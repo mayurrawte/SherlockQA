@@ -19,7 +19,14 @@ const {
   callOllama,
   callBedrock,
   defaultModelFor,
+  matchPattern,
+  checkoutMatchesPr,
 } = require('./index');
+
+const path = require('path');
+const fs = require('fs');
+const os = require('os');
+const { execFileSync } = require('child_process');
 
 // Silence @actions/core's ::warning:: output during the parse-fallback tests.
 beforeAll(() => { jest.spyOn(console, 'log').mockImplementation(() => {}); });
@@ -468,11 +475,117 @@ describe('parseChangedRangesForFile (Task 3 — codebase context hunk ranges)', 
       '-old1',
       '-old2',
     ].join('\n');
-    expect(parseChangedRangesForFile(diff, '/dev/null')).toEqual([]);
+    expect(parseChangedRangesForFile(diff, 'gone.js')).toEqual([]);
   });
 
   test('returns an empty array for a file not present in the diff', () => {
     expect(parseChangedRangesForFile(twoFileDiff, 'nope.js')).toEqual([]);
+  });
+});
+
+// Was: "a pure-deletion hunk produces no addressable positions" against
+// parseChangedRangesForFile('/dev/null') — trivially true because
+// parseChangedRangesForFile only ever sets currentFile from "+++ b/...", so
+// querying it for the literal string '/dev/null' can never match regardless
+// of the deletion-hunk logic (deferred finding from Task 3's review). This
+// replaces it with a real end-to-end check that a PR deleting a whole
+// function still surfaces cross-file context (spec step 2): the deleted
+// symbol is extracted from the diff's "-" lines (kind: 'deleted') and its
+// call sites in unchanged files are found via git grep, exactly like a
+// changed symbol would be.
+describe('deleted-symbol extraction (spec step 2 — deletions must still surface context)', () => {
+  const { gatherCodebaseContext } = require('./context');
+  let repoDir;
+
+  beforeAll(() => {
+    repoDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sherlockqa-deleted-symbol-'));
+    execFileSync('git', ['init'], { cwd: repoDir });
+    execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: repoDir });
+    execFileSync('git', ['config', 'user.name', 'Test'], { cwd: repoDir });
+    fs.writeFileSync(
+      path.join(repoDir, 'caller.js'),
+      'const a = oldHelper(1);\nconst b = oldHelper(2);\n'
+    );
+    execFileSync('git', ['add', '.'], { cwd: repoDir });
+    execFileSync('git', ['commit', '-m', 'init'], { cwd: repoDir });
+  });
+
+  afterAll(() => {
+    fs.rmSync(repoDir, { recursive: true, force: true });
+  });
+
+  test('a whole-file deletion still reports the deleted function and finds its remaining references', async () => {
+    // helpers.js never exists on disk in repoDir (it's deleted in this PR) -
+    // extraction must rely entirely on the diff's "-" lines, not the working tree.
+    const diff = [
+      'diff --git a/helpers.js b/helpers.js',
+      'deleted file mode 100644',
+      '--- a/helpers.js',
+      '+++ /dev/null',
+      '@@ -1,3 +0,0 @@',
+      '-function oldHelper(x) {',
+      '-  return x * 2;',
+      '-}',
+    ].join('\n');
+
+    const result = await gatherCodebaseContext({
+      files: ['helpers.js'],
+      diff,
+      parseRanges: parseChangedRangesForFile,
+      ignorePatterns: [],
+      matchPattern,
+      maxChars: 10000,
+      cwd: repoDir,
+    });
+
+    expect(result).toContain('oldHelper (deleted from helpers.js)');
+    expect(result).toContain('caller.js:1');
+    expect(result).toContain('oldHelper(1)');
+  });
+});
+
+describe('checkoutMatchesPr (Important #1 — verify the checkout is the PR head)', () => {
+  let repoDir;
+  let headSha;
+
+  beforeAll(() => {
+    repoDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sherlockqa-checkout-fixture-'));
+    execFileSync('git', ['init'], { cwd: repoDir });
+    execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: repoDir });
+    execFileSync('git', ['config', 'user.name', 'Test'], { cwd: repoDir });
+    fs.writeFileSync(path.join(repoDir, 'f.txt'), 'hello\n');
+    execFileSync('git', ['add', '.'], { cwd: repoDir });
+    execFileSync('git', ['commit', '-m', 'init'], { cwd: repoDir });
+    headSha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repoDir, encoding: 'utf8' }).trim();
+  });
+
+  afterAll(() => {
+    fs.rmSync(repoDir, { recursive: true, force: true });
+  });
+
+  test('matches when the checked-out HEAD equals the PR head sha', () => {
+    expect(checkoutMatchesPr(repoDir, headSha, null)).toBe(true);
+  });
+
+  test('matches when the checked-out HEAD equals the PR merge_commit_sha (head sha absent/wrong)', () => {
+    expect(checkoutMatchesPr(repoDir, 'deadbeef', headSha)).toBe(true);
+  });
+
+  test('does not match a random/unrelated sha', () => {
+    expect(checkoutMatchesPr(repoDir, '0000000000000000000000000000000000000000', 'also-not-it')).toBe(false);
+  });
+
+  test('handles null head/merge shas without throwing', () => {
+    expect(checkoutMatchesPr(repoDir, null, null)).toBe(false);
+  });
+
+  test('returns false (never throws) for a non-repo directory', () => {
+    const nonRepoDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sherlockqa-not-a-repo-'));
+    try {
+      expect(checkoutMatchesPr(nonRepoDir, headSha, null)).toBe(false);
+    } finally {
+      fs.rmSync(nonRepoDir, { recursive: true, force: true });
+    }
   });
 });
 
