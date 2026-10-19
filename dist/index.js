@@ -39943,7 +39943,10 @@ const RULE_PATHS = ['CLAUDE.md', 'AGENTS.md', 'PATTERNS.md', '.cursorrules', '.g
 const RULES_DIR = '.sherlockqa/rules/';
 
 function git(repoPath, args) {
-  return execFileSync('git', ['-C', repoPath, ...args], { encoding: 'utf8', stdio: 'pipe', maxBuffer: 10 * 1024 * 1024 });
+  return execFileSync('git', ['-C', repoPath, ...args], {
+    encoding: 'utf8', stdio: 'pipe', maxBuffer: 10 * 1024 * 1024,
+    timeout: 30000, env: { ...process.env, GIT_TERMINAL_PROMPT: '0' }
+  });
 }
 
 // Reads from the base commit only, so a PR cannot rewrite the rules it is reviewed against.

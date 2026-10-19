@@ -121,6 +121,19 @@ describe('loadRuleFiles', () => {
   });
 });
 
+describe('loadRuleFiles with an unreachable origin', () => {
+  test('returns no rules and the base-commit warning', () => {
+    const repo = mkTmp();
+    initRepo(repo);
+    commit(repo, { 'CLAUDE.md': 'x' }, 'only');
+    git(repo, 'remote', 'add', 'origin', path.join(os.tmpdir(), 'sherlock-no-such-origin'));
+    const missingSha = 'a'.repeat(40);
+    const { rules, warning } = loadRuleFiles({ repoPath: repo, baseSha: missingSha });
+    expect(rules).toEqual([]);
+    expect(warning).toMatch(/base commit is unavailable/);
+  });
+});
+
 describe('buildSystemPrompt repo rules', () => {
   test('places rules after the domain-knowledge section', () => {
     const prompt = buildSystemPrompt('', 'DOMAIN', false, 'detective', 'balanced', 'general', 5, 'RULES');
