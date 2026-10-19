@@ -8,14 +8,16 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) an
 ## [Unreleased]
 
 ### Added
-- **Repository rule files** — SherlockQA reads `CLAUDE.md`, `AGENTS.md`, `PATTERNS.md`, `.cursorrules`, `.github/copilot-instructions.md` and `.sherlockqa/rules/*.md` from the PR's base branch and adds them to the review prompt (up to 20,000 characters); `actions/checkout` must run before SherlockQA.
+- **Repository rule files** — SherlockQA reads `CLAUDE.md`, `AGENTS.md`, `PATTERNS.md`, `.cursorrules`, `.github/copilot-instructions.md` and `.sherlockqa/rules/*.md` from the PR's base branch and adds them to the review prompt (up to 20,000 characters). `actions/checkout` must run before SherlockQA; without it, repository rules are skipped with a warning.
 - **Local replay benchmark** — `bench/` replays saved cases through a SherlockQA version so review quality can be compared between versions (see [bench/README.md](bench/README.md)).
 
 ### Changed
-- **Large PRs are reviewed in full** — the diff is split into groups of related files, each reviewed in its own model call, and the findings are merged instead of being cut off at 50,000 characters. If a group's review fails, the summary names the unreviewed files and the verdict is never `approved`.
+- **Large PRs are reviewed in groups instead of cut off** — a diff over 50,000 characters is split into groups of related files, each reviewed in its own model call, and the findings are merged. If a group's review fails, the summary names the unreviewed files and the verdict is never `approved`.
 - **Internal module split** — `src/index.js` is split into pipeline modules (`collect`, `context`, `review`, `providers/`, `findings`, `publish`) with no behaviour change.
 
 ### Fixed
+- **Security: `.sherlockqa.yml` is now read from the base branch when the repo is checked out** — a PR can no longer change its own review settings (auto-approve, ignore patterns, persona).
+- **Pull requests with more than 30 files** — the changed-file list is now paginated, so every file is considered.
 - **Ignored files no longer use up the review budget** — files matching `ignore-patterns` are removed from the diff sent to the model, not only from the file list.
 
 ### Planned
