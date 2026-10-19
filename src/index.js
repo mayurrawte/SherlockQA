@@ -190,14 +190,12 @@ async function run() {
 
     core.info(`Reviewing ${filesToReview.length} files`);
 
-    const MAX_DIFF_CHARS = 50000;
-    const truncated = diff.length > MAX_DIFF_CHARS;
-    const diffContent = truncated ? diff.slice(0, MAX_DIFF_CHARS) + '\n\n... [diff truncated]' : diff;
-
-    const { review, usage, responseTruncated } = await getAIReview({
-      provider: aiProvider, model, diff: diffContent, files: filesToReview,
-      prAuthor, persona, domainKnowledge, maxTokens, codeQuality,
-      personality, strictness: reviewStrictness, mode, maxComments
+    const { review, usage, truncated, responseTruncated } = await reviewDiff({
+      diff, files: filesToReview,
+      config: {
+        provider: aiProvider, model, prAuthor, persona, domainKnowledge, maxTokens,
+        codeQuality, personality, strictness: reviewStrictness, mode, maxComments
+      }
     });
 
     const cost = estimateCost(model, usage);
@@ -424,6 +422,15 @@ async function syncInlineComments(octokit, owner, repo, prNumber, commitSha, com
     }
   }
   return posted;
+}
+
+async function reviewDiff({ diff, files, config }) {
+  const MAX_DIFF_CHARS = 50000;
+  const truncated = diff.length > MAX_DIFF_CHARS;
+  const diffContent = truncated ? diff.slice(0, MAX_DIFF_CHARS) + '\n\n... [diff truncated]' : diff;
+
+  const { review, usage, responseTruncated } = await getAIReview({ ...config, diff: diffContent, files });
+  return { review, usage, truncated, responseTruncated };
 }
 
 async function getAIReview(opts) {
@@ -1405,6 +1412,7 @@ module.exports = {
   buildSystemPrompt,
   buildUserPrompt,
   buildReviewBody,
+  reviewDiff,
   callAnthropic,
   callOllama,
   callBedrock,

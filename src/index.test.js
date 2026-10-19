@@ -18,6 +18,7 @@ const {
   callOllama,
   callBedrock,
   defaultModelFor,
+  reviewDiff,
 } = require('./index');
 
 // Silence @actions/core's ::warning:: output during the parse-fallback tests.
@@ -785,5 +786,27 @@ describe('buildSystemPrompt high-signal rules', () => {
   test('JSON schema includes confidence', () => {
     const p = buildSystemPrompt('', '', false, 'professional', 'balanced', 'general', 5);
     expect(p).toContain('"confidence"');
+  });
+});
+
+describe('reviewDiff', () => {
+  const origFetch = global.fetch;
+  beforeEach(() => { process.env['INPUT_ANTHROPIC-API-KEY'] = 'test-key'; });
+  afterEach(() => { global.fetch = origFetch; delete process.env['INPUT_ANTHROPIC-API-KEY']; });
+
+  test('reviewDiff truncates at 50000 chars and makes one call', async () => {
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        content: [{ type: 'text', text: '{"summary": "ok", "verdict": "approved", "line_comments": []}' }],
+        stop_reason: 'end_turn',
+        usage: { input_tokens: 10, output_tokens: 5 }
+      })
+    });
+    const config = { provider: 'anthropic', model: 'claude-sonnet-4-5', maxTokens: 4096, strictness: 'balanced', mode: 'standard', maxComments: 10 };
+    const r = await reviewDiff({ diff: 'x'.repeat(60000), files: [{ filename: 'a.js' }], config });
+    expect(r.truncated).toBe(true);
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+    expect(global.fetch.mock.calls[0][1].body).toContain('[diff truncated]');
   });
 });
