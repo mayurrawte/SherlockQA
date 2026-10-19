@@ -126,6 +126,17 @@ describe('reviewDiff in groups', () => {
     expect(r.review).toEqual(review);
   });
 
+  test('a small multi-directory diff reaches the provider unchanged', async () => {
+    global.fetch = jest.fn().mockResolvedValue(okResponse({ summary: 'ok', verdict: 'approved', line_comments: [] }));
+    const diff = fileDiff('src/b.js', 100) + fileDiff('lib/c.js', 100) + fileDiff('src/a.js', 100);
+    await reviewDiff({ diff, files, config });
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+    const body = JSON.parse(global.fetch.mock.calls[0][1].body);
+    const sent = JSON.stringify(body.messages);
+    expect(sent).toContain(JSON.stringify(diff).slice(1, -1));
+    expect(sent).toContain('src/a.js\\nsrc/b.js\\nlib/c.js');
+  });
+
   test('a group that fails puts its files in failedFiles and keeps the other findings', async () => {
     const finding = { file: 'src/a.js', line: 2, severity: 'error', comment: 'bug' };
     global.fetch = jest.fn().mockImplementation(async (url, opts) => {

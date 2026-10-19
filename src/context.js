@@ -10,10 +10,7 @@ function git(repoPath, args) {
   });
 }
 
-// Reads from the base commit only, so a PR cannot rewrite the rules it is reviewed against.
-function loadRuleFiles({ repoPath, baseSha, budgetChars = 20000 }) {
-  const unavailable = { rules: [], warning: 'Repository rules skipped: the base commit is unavailable.' };
-
+function ensureBaseCommit(repoPath, baseSha) {
   try {
     git(repoPath, ['cat-file', '-e', `${baseSha}^{commit}`]);
   } catch {
@@ -21,8 +18,26 @@ function loadRuleFiles({ repoPath, baseSha, budgetChars = 20000 }) {
       git(repoPath, ['fetch', '--depth=1', 'origin', baseSha]);
       git(repoPath, ['cat-file', '-e', `${baseSha}^{commit}`]);
     } catch {
-      return unavailable;
+      return false;
     }
+  }
+  return true;
+}
+
+function formatRules(rules) {
+  return rules.map(r => `### ${r.path}\n${r.text}`).join('\n\n');
+}
+
+// Reads from the base commit only, so a PR cannot rewrite the rules it is reviewed against.
+function loadRuleFiles({ repoPath, baseSha, budgetChars = 20000 }) {
+  try {
+    git(repoPath, ['rev-parse', '--git-dir']);
+  } catch {
+    return { rules: [], warning: 'No checkout found; add actions/checkout before SherlockQA to apply repository rules.' };
+  }
+
+  if (!ensureBaseCommit(repoPath, baseSha)) {
+    return { rules: [], warning: 'Repository rules skipped: the base commit is unavailable.' };
   }
 
   let ruleDirFiles = [];
@@ -57,4 +72,4 @@ function loadRuleFiles({ repoPath, baseSha, budgetChars = 20000 }) {
   return { rules, warning };
 }
 
-module.exports = { loadRuleFiles };
+module.exports = { git, ensureBaseCommit, formatRules, loadRuleFiles };

@@ -3,7 +3,7 @@ const github = require('@actions/github');
 const { SEVERITY_EMOJI, normalizeSeverity, normalizeConfidence, filterAndRouteComments, parseReviewResponse, countSeverity } = require('./findings');
 const { makeInputResolver, loadRepoConfig, matchPattern, globToRegex, filterDiff } = require('./collect');
 const { defaultModelFor, reviewDiff, estimateCost, buildSystemPrompt, buildUserPrompt } = require('./review');
-const { loadRuleFiles } = require('./context');
+const { loadRuleFiles, formatRules } = require('./context');
 const { REVIEW_MARKER, isSherlockReview, findPreviousState, syncInlineComments, buildReviewBody, parseDiffForLinePositions, upsertStickyComment, createCheckRunSafely, isScenarioPreviouslyChecked } = require('./publish');
 const { callAnthropic } = require('./providers/anthropic');
 const { callBedrock } = require('./providers/bedrock');
@@ -12,7 +12,7 @@ const { callOllama } = require('./providers/ollama');
 async function run() {
   try {
     // Load .sherlockqa.yml from the workspace if present. Action inputs always win.
-    const repoConfig = loadRepoConfig();
+    const repoConfig = loadRepoConfig(github.context.payload.pull_request?.base?.sha);
     const getInput = makeInputResolver(repoConfig);
 
     const githubToken = core.getInput('github-token', { required: true });
@@ -65,8 +65,8 @@ async function run() {
       mediaType: { format: 'diff' }
     });
 
-    const { data: files } = await octokit.rest.pulls.listFiles({
-      owner, repo, pull_number: prNumber
+    const files = await octokit.paginate(octokit.rest.pulls.listFiles, {
+      owner, repo, pull_number: prNumber, per_page: 100
     });
 
     const filesToReview = files.filter(file =>
@@ -91,7 +91,7 @@ async function run() {
       baseSha: context.payload.pull_request.base.sha
     });
     if (rulesWarning) core.warning(rulesWarning);
-    const repoRules = rules.map(r => `### ${r.path}\n${r.text}`).join('\n\n');
+    const repoRules = formatRules(rules);
 
     const { review, usage, truncated, responseTruncated, failedFiles } = await reviewDiff({
       diff: filteredDiff, files: filesToReview,

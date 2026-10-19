@@ -1,4 +1,8 @@
-const { filterDiff } = require('./collect');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const { execFileSync } = require('child_process');
+const { filterDiff, loadRepoConfig } = require('./collect');
 
 const lockBlock = [
   'diff --git a/uv.lock b/uv.lock',
@@ -107,5 +111,47 @@ describe('filterDiff', () => {
   test('does not treat a hunk line that looks like a header as a file boundary', () => {
     const tricky = codeBlock.replace('+b', '+++ b/uv.lock');
     expect(filterDiff(tricky, ['uv.lock'])).toBe(tricky);
+  });
+});
+
+describe('loadRepoConfig', () => {
+  const tmpDirs = [];
+  const origWorkspace = process.env.GITHUB_WORKSPACE;
+  afterEach(() => {
+    process.env.GITHUB_WORKSPACE = origWorkspace;
+    if (origWorkspace === undefined) delete process.env.GITHUB_WORKSPACE;
+    for (const dir of tmpDirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  function mkTmp() {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sherlock-cfg-'));
+    tmpDirs.push(dir);
+    process.env.GITHUB_WORKSPACE = dir;
+    return dir;
+  }
+
+  function git(cwd, ...args) {
+    return execFileSync('git', ['-C', cwd, ...args], { encoding: 'utf8', stdio: 'pipe' }).trim();
+  }
+
+  test('reads the base commit version, not the PR version', () => {
+    const repo = mkTmp();
+    git(repo, 'init', '-q');
+    git(repo, 'config', 'user.email', 'test@example.com');
+    git(repo, 'config', 'user.name', 'Test');
+    git(repo, 'config', 'commit.gpgsign', 'false');
+    fs.writeFileSync(path.join(repo, '.sherlockqa.yml'), 'max-comments: 3\n');
+    git(repo, 'add', '-A');
+    git(repo, 'commit', '-q', '-m', 'base');
+    const baseSha = git(repo, 'rev-parse', 'HEAD');
+    fs.writeFileSync(path.join(repo, '.sherlockqa.yml'), 'max-comments: 99\n');
+    git(repo, 'commit', '-q', '-am', 'pr');
+    expect(loadRepoConfig(baseSha)).toEqual({ 'max-comments': 3 });
+  });
+
+  test('without .git the working-tree file is read', () => {
+    const dir = mkTmp();
+    fs.writeFileSync(path.join(dir, '.sherlockqa.yml'), 'max-comments: 7\n');
+    expect(loadRepoConfig('abc123')).toEqual({ 'max-comments': 7 });
   });
 });

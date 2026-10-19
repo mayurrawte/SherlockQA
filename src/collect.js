@@ -2,6 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const core = require('@actions/core');
 const yaml = require('js-yaml');
+const { git, ensureBaseCommit } = require('./context');
 
 // Input resolution: action input > .sherlockqa.yml > '' (code defaults apply
 // at the call sites). action.yml must NOT declare defaults for these keys —
@@ -17,21 +18,30 @@ function makeInputResolver(repoConfig) {
   };
 }
 
-function loadRepoConfig() {
+// With a checkout the working tree may hold the PR's code, so config is read from the base commit.
+function loadRepoConfig(baseSha) {
   const workspace = process.env.GITHUB_WORKSPACE || process.cwd();
   const candidates = ['.sherlockqa.yml', '.sherlockqa.yaml', '.sherlock.yml'];
+  const fromBase = Boolean(baseSha) && fs.existsSync(path.join(workspace, '.git'));
+  if (fromBase && !ensureBaseCommit(workspace, baseSha)) {
+    core.warning('Repository config skipped: the base commit is unavailable.');
+    return {};
+  }
   for (const name of candidates) {
-    const p = path.join(workspace, name);
-    if (fs.existsSync(p)) {
-      try {
-        const parsed = yaml.load(fs.readFileSync(p, 'utf8'));
-        if (parsed && typeof parsed === 'object') {
-          core.info(`Loaded config from ${name}`);
-          return parsed;
-        }
-      } catch (e) {
-        core.warning(`Failed to parse ${name}: ${e.message}`);
+    let text;
+    try {
+      text = fromBase ? git(workspace, ['show', `${baseSha}:${name}`]) : fs.readFileSync(path.join(workspace, name), 'utf8');
+    } catch {
+      continue;
+    }
+    try {
+      const parsed = yaml.load(text);
+      if (parsed && typeof parsed === 'object') {
+        core.info(`Loaded config from ${name}`);
+        return parsed;
       }
+    } catch (e) {
+      core.warning(`Failed to parse ${name}: ${e.message}`);
     }
   }
   return {};
