@@ -39759,7 +39759,9 @@ const fs = __nccwpck_require__(9896);
 const path = __nccwpck_require__(6928);
 const core = __nccwpck_require__(7484);
 const yaml = __nccwpck_require__(4281);
-const { git, ensureBaseCommit } = __nccwpck_require__(4270);
+const { git, hasCheckout, ensureBaseCommit } = __nccwpck_require__(4270);
+
+const DEFAULT_IGNORE_PATTERNS = '*.md,*.txt,package-lock.json,yarn.lock';
 
 // Input resolution: action input > .sherlockqa.yml > '' (code defaults apply
 // at the call sites). action.yml must NOT declare defaults for these keys —
@@ -39779,7 +39781,7 @@ function makeInputResolver(repoConfig) {
 function loadRepoConfig(baseSha) {
   const workspace = process.env.GITHUB_WORKSPACE || process.cwd();
   const candidates = ['.sherlockqa.yml', '.sherlockqa.yaml', '.sherlock.yml'];
-  const fromBase = Boolean(baseSha) && fs.existsSync(path.join(workspace, '.git'));
+  const fromBase = Boolean(baseSha) && hasCheckout(workspace);
   if (fromBase && !ensureBaseCommit(workspace, baseSha)) {
     core.warning('Repository config skipped: the base commit is unavailable.');
     return {};
@@ -39844,15 +39846,13 @@ function globToRegex(glob) {
 }
 
 function filterDiff(diffText, ignorePatterns) {
-  const lines = diffText.split(/(?<=\n)/);
-  const kept = [];
-  let block = [];
-  const flush = () => {
-    if (block.length === 0) return;
+  const firstHeader = diffText.search(/^diff --git /m);
+  const preamble = firstHeader === -1 ? diffText : diffText.slice(0, firstHeader);
+  const kept = splitDiffByFile(diffText).filter(fileDiff => {
     let filePath = null;
     let oldPath = null;
     let renameTo = null;
-    for (const rawLine of block.slice(1)) {
+    for (const rawLine of fileDiff.text.split('\n').slice(1)) {
       const line = rawLine.trimEnd();
       if (line.startsWith('@@')) break;
       if (line.startsWith('rename to ')) renameTo = line.slice('rename to '.length);
@@ -39860,22 +39860,10 @@ function filterDiff(diffText, ignorePatterns) {
       else if (line.startsWith('+++ b/')) filePath = line.slice('+++ b/'.length);
       else if (line === '+++ /dev/null') filePath = oldPath;
     }
-    if (!filePath) filePath = renameTo;
-    if (!filePath) {
-      const header = block[0].trimEnd().match(/^diff --git a\/.* b\/(.*)$/);
-      filePath = header ? header[1] : null;
-    }
-    if (!filePath || !ignorePatterns.some(pattern => matchPattern(filePath, pattern))) {
-      kept.push(...block);
-    }
-    block = [];
-  };
-  for (const line of lines) {
-    if (line.startsWith('diff --git ')) flush();
-    block.push(line);
-  }
-  flush();
-  return kept.join('');
+    filePath = filePath || renameTo || fileDiff.file;
+    return !ignorePatterns.some(pattern => matchPattern(filePath, pattern));
+  });
+  return preamble + kept.map(fileDiff => fileDiff.text).join('');
 }
 
 function splitDiffByFile(diffText) {
@@ -39932,6 +39920,7 @@ function groupFileDiffs(fileDiffs, budgetChars) {
 }
 
 module.exports = {
+  DEFAULT_IGNORE_PATTERNS,
   makeInputResolver,
   loadRepoConfig,
   matchPattern,
@@ -39959,7 +39948,22 @@ function git(repoPath, args) {
   });
 }
 
+function hasCheckout(repoPath) {
+  try {
+    git(repoPath, ['rev-parse', '--git-dir']);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// Config and rules both need the base commit; a failed fetch can take the full timeout, so try it once per run.
+const baseCommitAvailable = new Map();
+
 function ensureBaseCommit(repoPath, baseSha) {
+  const key = `${repoPath}\0${baseSha}`;
+  if (baseCommitAvailable.has(key)) return baseCommitAvailable.get(key);
+  let available = true;
   try {
     git(repoPath, ['cat-file', '-e', `${baseSha}^{commit}`]);
   } catch {
@@ -39967,10 +39971,11 @@ function ensureBaseCommit(repoPath, baseSha) {
       git(repoPath, ['fetch', '--depth=1', 'origin', baseSha]);
       git(repoPath, ['cat-file', '-e', `${baseSha}^{commit}`]);
     } catch {
-      return false;
+      available = false;
     }
   }
-  return true;
+  baseCommitAvailable.set(key, available);
+  return available;
 }
 
 function formatRules(rules) {
@@ -39979,9 +39984,7 @@ function formatRules(rules) {
 
 // Reads from the base commit only, so a PR cannot rewrite the rules it is reviewed against.
 function loadRuleFiles({ repoPath, baseSha, budgetChars = 20000 }) {
-  try {
-    git(repoPath, ['rev-parse', '--git-dir']);
-  } catch {
+  if (!hasCheckout(repoPath)) {
     return { rules: [], warning: 'No checkout found; add actions/checkout before SherlockQA to apply repository rules.' };
   }
 
@@ -40021,7 +40024,7 @@ function loadRuleFiles({ repoPath, baseSha, budgetChars = 20000 }) {
   return { rules, warning };
 }
 
-module.exports = { git, ensureBaseCommit, formatRules, loadRuleFiles };
+module.exports = { git, hasCheckout, ensureBaseCommit, formatRules, loadRuleFiles };
 
 
 /***/ }),
@@ -40138,7 +40141,7 @@ module.exports = {
 const core = __nccwpck_require__(7484);
 const github = __nccwpck_require__(3228);
 const { SEVERITY_EMOJI, normalizeSeverity, normalizeConfidence, filterAndRouteComments, parseReviewResponse, countSeverity } = __nccwpck_require__(7727);
-const { makeInputResolver, loadRepoConfig, matchPattern, globToRegex, filterDiff } = __nccwpck_require__(827);
+const { DEFAULT_IGNORE_PATTERNS, makeInputResolver, loadRepoConfig, matchPattern, globToRegex, filterDiff } = __nccwpck_require__(827);
 const { defaultModelFor, reviewDiff, estimateCost, buildSystemPrompt, buildUserPrompt } = __nccwpck_require__(1565);
 const { loadRuleFiles, formatRules } = __nccwpck_require__(4270);
 const { REVIEW_MARKER, isSherlockReview, findPreviousState, syncInlineComments, buildReviewBody, parseDiffForLinePositions, upsertStickyComment, createCheckRunSafely, isScenarioPreviouslyChecked } = __nccwpck_require__(2090);
@@ -40148,8 +40151,9 @@ const { callOllama } = __nccwpck_require__(212);
 
 async function run() {
   try {
+    const baseSha = github.context.payload.pull_request?.base?.sha;
     // Load .sherlockqa.yml from the workspace if present. Action inputs always win.
-    const repoConfig = loadRepoConfig(github.context.payload.pull_request?.base?.sha);
+    const repoConfig = loadRepoConfig(baseSha);
     const getInput = makeInputResolver(repoConfig);
 
     const githubToken = core.getInput('github-token', { required: true });
@@ -40166,7 +40170,7 @@ async function run() {
       core.warning('Invalid min-confidence input; falling back to default (0.6).');
       minConfidence = 0.6;
     }
-    const ignorePatterns = (getInput('ignore-patterns') || '*.md,*.txt,package-lock.json,yarn.lock')
+    const ignorePatterns = (getInput('ignore-patterns') || DEFAULT_IGNORE_PATTERNS)
       .split(',').map(p => p.trim()).filter(Boolean);
     const persona = getInput('persona') || '';
     const domainKnowledge = getInput('domain-knowledge') || '';
@@ -40210,13 +40214,8 @@ async function run() {
       !ignorePatterns.some(pattern => matchPattern(file.filename, pattern))
     );
 
-    if (filesToReview.length === 0) {
-      core.info('No files to review after filtering');
-      return;
-    }
-
     const filteredDiff = filterDiff(diff, ignorePatterns);
-    if (!filteredDiff) {
+    if (filesToReview.length === 0 || !filteredDiff) {
       core.info('No files to review after filtering');
       return;
     }
@@ -40225,7 +40224,7 @@ async function run() {
 
     const { rules, warning: rulesWarning } = loadRuleFiles({
       repoPath: process.env.GITHUB_WORKSPACE || process.cwd(),
-      baseSha: context.payload.pull_request.base.sha
+      baseSha
     });
     if (rulesWarning) core.warning(rulesWarning);
     const repoRules = formatRules(rules);
@@ -40887,6 +40886,7 @@ function buildReviewBody(review, prAuthor, previousCheckedScenarios = new Set(),
     ? ` (${formatSeverityBreakdown(severityCounts, useEmoji)})`
     : '';
   const minorNotesStr = minorNotes.length > 0 ? ` · +${minorNotes.length} minor note${minorNotes.length === 1 ? '' : 's'}` : '';
+  const failedFilesBanner = `> ${e.warning} **Heads up:** the AI review failed for ${failedFiles.join(', ')} — these files were not reviewed.\n`;
 
   const parts = [];
 
@@ -40901,7 +40901,7 @@ function buildReviewBody(review, prAuthor, previousCheckedScenarios = new Set(),
     if (review.verdict_reason) parts.push(`> ${review.verdict_reason}\n`);
 
     if (failedFiles.length > 0) {
-      parts.push(`> ${e.warning} **Heads up:** the AI review failed for ${failedFiles.join(', ')} — these files were not reviewed.\n`);
+      parts.push(failedFilesBanner);
     } else if (truncated) {
       parts.push(`> ${e.warning} **Heads up:** PR diff was large and got truncated — this review may have missed parts of the change. Consider splitting large PRs.\n`);
     }
@@ -40953,7 +40953,7 @@ function buildReviewBody(review, prAuthor, previousCheckedScenarios = new Set(),
     parts.push(`### ${e.summary} Summary\n${review.summary || 'No summary'}\n`);
 
     if (failedFiles.length > 0) {
-      parts.push(`> ${e.warning} **Heads up:** the AI review failed for ${failedFiles.join(', ')} — these files were not reviewed.\n`);
+      parts.push(failedFilesBanner);
     } else if (truncated) {
       parts.push(`> ${e.warning} **Heads up:** PR diff was large and got truncated — this review may have missed parts of the change.\n`);
     }
@@ -41242,17 +41242,19 @@ function mergeReviews(reviews) {
 }
 
 async function reviewDiff({ diff, files, config }) {
-  const groups = diff.length <= MAX_DIFF_CHARS ? [] : groupFileDiffs(splitDiffByFile(diff), MAX_DIFF_CHARS);
-  if (groups.length === 0) groups.push([{ file: '', text: diff }]);
+  const groups = diff.length <= MAX_DIFF_CHARS
+    ? [[{ file: '', text: diff }]]
+    : groupFileDiffs(splitDiffByFile(diff), MAX_DIFF_CHARS);
 
   const reviews = [];
-  const failedFiles = [];
+  const failedFiles = new Set();
   const usage = { input: 0, output: 0 };
   let responseTruncated = false;
   let lastError;
   for (const group of groups) {
     const groupNames = group.map(f => f.file);
-    const groupFiles = groups.length > 1 ? files.filter(f => groupNames.includes(f.filename)) : files;
+    const groupNameSet = new Set(groupNames);
+    const groupFiles = groups.length > 1 ? files.filter(f => groupNameSet.has(f.filename)) : files;
     try {
       const result = await getAIReview({ ...config, diff: group.map(f => f.text).join(''), files: groupFiles });
       reviews.push(result.review);
@@ -41262,17 +41264,14 @@ async function reviewDiff({ diff, files, config }) {
     } catch (e) {
       lastError = e;
       core.warning(`Review of ${groupNames.join(', ')} failed: ${e.message}`);
-      for (const name of groupNames) {
-        if (!failedFiles.includes(name)) failedFiles.push(name);
-      }
+      groupNames.forEach(name => failedFiles.add(name));
     }
   }
   if (reviews.length === 0) throw lastError;
 
   let review = mergeReviews(reviews);
-  // Unreviewed files must never be auto-approved.
-  if (failedFiles.length > 0 && review.verdict === 'approved') review = { ...review, verdict: 'needs_changes' };
-  return { review, usage, truncated: false, responseTruncated, failedFiles };
+  if (failedFiles.size > 0 && review.verdict === 'approved') review = { ...review, verdict: 'needs_changes' };
+  return { review, usage, truncated: false, responseTruncated, failedFiles: [...failedFiles] };
 }
 
 async function getAIReview(opts) {

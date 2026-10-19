@@ -1,7 +1,7 @@
 const core = require('@actions/core');
 const github = require('@actions/github');
 const { SEVERITY_EMOJI, normalizeSeverity, normalizeConfidence, filterAndRouteComments, parseReviewResponse, countSeverity } = require('./findings');
-const { makeInputResolver, loadRepoConfig, matchPattern, globToRegex, filterDiff } = require('./collect');
+const { DEFAULT_IGNORE_PATTERNS, makeInputResolver, loadRepoConfig, matchPattern, globToRegex, filterDiff } = require('./collect');
 const { defaultModelFor, reviewDiff, estimateCost, buildSystemPrompt, buildUserPrompt } = require('./review');
 const { loadRuleFiles, formatRules } = require('./context');
 const { REVIEW_MARKER, isSherlockReview, findPreviousState, syncInlineComments, buildReviewBody, parseDiffForLinePositions, upsertStickyComment, createCheckRunSafely, isScenarioPreviouslyChecked } = require('./publish');
@@ -11,8 +11,9 @@ const { callOllama } = require('./providers/ollama');
 
 async function run() {
   try {
+    const baseSha = github.context.payload.pull_request?.base?.sha;
     // Load .sherlockqa.yml from the workspace if present. Action inputs always win.
-    const repoConfig = loadRepoConfig(github.context.payload.pull_request?.base?.sha);
+    const repoConfig = loadRepoConfig(baseSha);
     const getInput = makeInputResolver(repoConfig);
 
     const githubToken = core.getInput('github-token', { required: true });
@@ -29,7 +30,7 @@ async function run() {
       core.warning('Invalid min-confidence input; falling back to default (0.6).');
       minConfidence = 0.6;
     }
-    const ignorePatterns = (getInput('ignore-patterns') || '*.md,*.txt,package-lock.json,yarn.lock')
+    const ignorePatterns = (getInput('ignore-patterns') || DEFAULT_IGNORE_PATTERNS)
       .split(',').map(p => p.trim()).filter(Boolean);
     const persona = getInput('persona') || '';
     const domainKnowledge = getInput('domain-knowledge') || '';
@@ -73,13 +74,8 @@ async function run() {
       !ignorePatterns.some(pattern => matchPattern(file.filename, pattern))
     );
 
-    if (filesToReview.length === 0) {
-      core.info('No files to review after filtering');
-      return;
-    }
-
     const filteredDiff = filterDiff(diff, ignorePatterns);
-    if (!filteredDiff) {
+    if (filesToReview.length === 0 || !filteredDiff) {
       core.info('No files to review after filtering');
       return;
     }
@@ -88,7 +84,7 @@ async function run() {
 
     const { rules, warning: rulesWarning } = loadRuleFiles({
       repoPath: process.env.GITHUB_WORKSPACE || process.cwd(),
-      baseSha: context.payload.pull_request.base.sha
+      baseSha
     });
     if (rulesWarning) core.warning(rulesWarning);
     const repoRules = formatRules(rules);

@@ -10,7 +10,22 @@ function git(repoPath, args) {
   });
 }
 
+function hasCheckout(repoPath) {
+  try {
+    git(repoPath, ['rev-parse', '--git-dir']);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// Config and rules both need the base commit; a failed fetch can take the full timeout, so try it once per run.
+const baseCommitAvailable = new Map();
+
 function ensureBaseCommit(repoPath, baseSha) {
+  const key = `${repoPath}\0${baseSha}`;
+  if (baseCommitAvailable.has(key)) return baseCommitAvailable.get(key);
+  let available = true;
   try {
     git(repoPath, ['cat-file', '-e', `${baseSha}^{commit}`]);
   } catch {
@@ -18,10 +33,11 @@ function ensureBaseCommit(repoPath, baseSha) {
       git(repoPath, ['fetch', '--depth=1', 'origin', baseSha]);
       git(repoPath, ['cat-file', '-e', `${baseSha}^{commit}`]);
     } catch {
-      return false;
+      available = false;
     }
   }
-  return true;
+  baseCommitAvailable.set(key, available);
+  return available;
 }
 
 function formatRules(rules) {
@@ -30,9 +46,7 @@ function formatRules(rules) {
 
 // Reads from the base commit only, so a PR cannot rewrite the rules it is reviewed against.
 function loadRuleFiles({ repoPath, baseSha, budgetChars = 20000 }) {
-  try {
-    git(repoPath, ['rev-parse', '--git-dir']);
-  } catch {
+  if (!hasCheckout(repoPath)) {
     return { rules: [], warning: 'No checkout found; add actions/checkout before SherlockQA to apply repository rules.' };
   }
 
@@ -72,4 +86,4 @@ function loadRuleFiles({ repoPath, baseSha, budgetChars = 20000 }) {
   return { rules, warning };
 }
 
-module.exports = { git, ensureBaseCommit, formatRules, loadRuleFiles };
+module.exports = { git, hasCheckout, ensureBaseCommit, formatRules, loadRuleFiles };

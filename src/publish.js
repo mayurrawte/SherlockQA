@@ -152,6 +152,7 @@ function buildReviewBody(review, prAuthor, previousCheckedScenarios = new Set(),
     ? ` (${formatSeverityBreakdown(severityCounts, useEmoji)})`
     : '';
   const minorNotesStr = minorNotes.length > 0 ? ` · +${minorNotes.length} minor note${minorNotes.length === 1 ? '' : 's'}` : '';
+  const failedFilesBanner = `> ${e.warning} **Heads up:** the AI review failed for ${failedFiles.join(', ')} — these files were not reviewed.\n`;
 
   const parts = [];
 
@@ -166,7 +167,7 @@ function buildReviewBody(review, prAuthor, previousCheckedScenarios = new Set(),
     if (review.verdict_reason) parts.push(`> ${review.verdict_reason}\n`);
 
     if (failedFiles.length > 0) {
-      parts.push(`> ${e.warning} **Heads up:** the AI review failed for ${failedFiles.join(', ')} — these files were not reviewed.\n`);
+      parts.push(failedFilesBanner);
     } else if (truncated) {
       parts.push(`> ${e.warning} **Heads up:** PR diff was large and got truncated — this review may have missed parts of the change. Consider splitting large PRs.\n`);
     }
@@ -218,7 +219,7 @@ function buildReviewBody(review, prAuthor, previousCheckedScenarios = new Set(),
     parts.push(`### ${e.summary} Summary\n${review.summary || 'No summary'}\n`);
 
     if (failedFiles.length > 0) {
-      parts.push(`> ${e.warning} **Heads up:** the AI review failed for ${failedFiles.join(', ')} — these files were not reviewed.\n`);
+      parts.push(failedFilesBanner);
     } else if (truncated) {
       parts.push(`> ${e.warning} **Heads up:** PR diff was large and got truncated — this review may have missed parts of the change.\n`);
     }

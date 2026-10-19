@@ -2,7 +2,9 @@ const fs = require('fs');
 const path = require('path');
 const core = require('@actions/core');
 const yaml = require('js-yaml');
-const { git, ensureBaseCommit } = require('./context');
+const { git, hasCheckout, ensureBaseCommit } = require('./context');
+
+const DEFAULT_IGNORE_PATTERNS = '*.md,*.txt,package-lock.json,yarn.lock';
 
 // Input resolution: action input > .sherlockqa.yml > '' (code defaults apply
 // at the call sites). action.yml must NOT declare defaults for these keys —
@@ -22,7 +24,7 @@ function makeInputResolver(repoConfig) {
 function loadRepoConfig(baseSha) {
   const workspace = process.env.GITHUB_WORKSPACE || process.cwd();
   const candidates = ['.sherlockqa.yml', '.sherlockqa.yaml', '.sherlock.yml'];
-  const fromBase = Boolean(baseSha) && fs.existsSync(path.join(workspace, '.git'));
+  const fromBase = Boolean(baseSha) && hasCheckout(workspace);
   if (fromBase && !ensureBaseCommit(workspace, baseSha)) {
     core.warning('Repository config skipped: the base commit is unavailable.');
     return {};
@@ -87,15 +89,13 @@ function globToRegex(glob) {
 }
 
 function filterDiff(diffText, ignorePatterns) {
-  const lines = diffText.split(/(?<=\n)/);
-  const kept = [];
-  let block = [];
-  const flush = () => {
-    if (block.length === 0) return;
+  const firstHeader = diffText.search(/^diff --git /m);
+  const preamble = firstHeader === -1 ? diffText : diffText.slice(0, firstHeader);
+  const kept = splitDiffByFile(diffText).filter(fileDiff => {
     let filePath = null;
     let oldPath = null;
     let renameTo = null;
-    for (const rawLine of block.slice(1)) {
+    for (const rawLine of fileDiff.text.split('\n').slice(1)) {
       const line = rawLine.trimEnd();
       if (line.startsWith('@@')) break;
       if (line.startsWith('rename to ')) renameTo = line.slice('rename to '.length);
@@ -103,22 +103,10 @@ function filterDiff(diffText, ignorePatterns) {
       else if (line.startsWith('+++ b/')) filePath = line.slice('+++ b/'.length);
       else if (line === '+++ /dev/null') filePath = oldPath;
     }
-    if (!filePath) filePath = renameTo;
-    if (!filePath) {
-      const header = block[0].trimEnd().match(/^diff --git a\/.* b\/(.*)$/);
-      filePath = header ? header[1] : null;
-    }
-    if (!filePath || !ignorePatterns.some(pattern => matchPattern(filePath, pattern))) {
-      kept.push(...block);
-    }
-    block = [];
-  };
-  for (const line of lines) {
-    if (line.startsWith('diff --git ')) flush();
-    block.push(line);
-  }
-  flush();
-  return kept.join('');
+    filePath = filePath || renameTo || fileDiff.file;
+    return !ignorePatterns.some(pattern => matchPattern(filePath, pattern));
+  });
+  return preamble + kept.map(fileDiff => fileDiff.text).join('');
 }
 
 function splitDiffByFile(diffText) {
@@ -175,6 +163,7 @@ function groupFileDiffs(fileDiffs, budgetChars) {
 }
 
 module.exports = {
+  DEFAULT_IGNORE_PATTERNS,
   makeInputResolver,
   loadRepoConfig,
   matchPattern,

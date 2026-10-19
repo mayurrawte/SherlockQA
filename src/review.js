@@ -44,17 +44,19 @@ function mergeReviews(reviews) {
 }
 
 async function reviewDiff({ diff, files, config }) {
-  const groups = diff.length <= MAX_DIFF_CHARS ? [] : groupFileDiffs(splitDiffByFile(diff), MAX_DIFF_CHARS);
-  if (groups.length === 0) groups.push([{ file: '', text: diff }]);
+  const groups = diff.length <= MAX_DIFF_CHARS
+    ? [[{ file: '', text: diff }]]
+    : groupFileDiffs(splitDiffByFile(diff), MAX_DIFF_CHARS);
 
   const reviews = [];
-  const failedFiles = [];
+  const failedFiles = new Set();
   const usage = { input: 0, output: 0 };
   let responseTruncated = false;
   let lastError;
   for (const group of groups) {
     const groupNames = group.map(f => f.file);
-    const groupFiles = groups.length > 1 ? files.filter(f => groupNames.includes(f.filename)) : files;
+    const groupNameSet = new Set(groupNames);
+    const groupFiles = groups.length > 1 ? files.filter(f => groupNameSet.has(f.filename)) : files;
     try {
       const result = await getAIReview({ ...config, diff: group.map(f => f.text).join(''), files: groupFiles });
       reviews.push(result.review);
@@ -64,17 +66,14 @@ async function reviewDiff({ diff, files, config }) {
     } catch (e) {
       lastError = e;
       core.warning(`Review of ${groupNames.join(', ')} failed: ${e.message}`);
-      for (const name of groupNames) {
-        if (!failedFiles.includes(name)) failedFiles.push(name);
-      }
+      groupNames.forEach(name => failedFiles.add(name));
     }
   }
   if (reviews.length === 0) throw lastError;
 
   let review = mergeReviews(reviews);
-  // Unreviewed files must never be auto-approved.
-  if (failedFiles.length > 0 && review.verdict === 'approved') review = { ...review, verdict: 'needs_changes' };
-  return { review, usage, truncated: false, responseTruncated, failedFiles };
+  if (failedFiles.size > 0 && review.verdict === 'approved') review = { ...review, verdict: 'needs_changes' };
+  return { review, usage, truncated: false, responseTruncated, failedFiles: [...failedFiles] };
 }
 
 async function getAIReview(opts) {

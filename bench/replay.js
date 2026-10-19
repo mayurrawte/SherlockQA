@@ -1,11 +1,11 @@
 const fs = require('fs');
 const path = require('path');
 const { execFileSync } = require('child_process');
-const { reviewDiff, estimateCost, defaultModelFor, filterAndRouteComments, matchPattern } = require('../src/index');
-const { filterDiff } = require('../src/collect');
+const { reviewDiff, estimateCost, defaultModelFor, filterAndRouteComments } = require('../src/index');
+const { DEFAULT_IGNORE_PATTERNS, filterDiff, splitDiffByFile } = require('../src/collect');
 const { loadRuleFiles, formatRules } = require('../src/context');
 
-const IGNORE_PATTERNS = ['*.md', '*.txt', 'package-lock.json', 'yarn.lock'];
+const IGNORE_PATTERNS = DEFAULT_IGNORE_PATTERNS.split(',');
 
 function isBugFlagged(findings, fixHunks) {
   return findings.some(finding =>
@@ -96,10 +96,7 @@ async function main() {
         }
         const { rules, warning } = loadRuleFiles({ repoPath: args.repo, baseSha: benchCase.base });
         if (warning) console.warn(`${benchCase.id}: ${warning}`);
-        const files = git('diff', '--name-only', range)
-          .split('\n')
-          .filter(name => name && !IGNORE_PATTERNS.some(pattern => matchPattern(name, pattern)))
-          .map(name => ({ filename: name }));
+        const files = splitDiffByFile(diff).map(fileDiff => ({ filename: fileDiff.file }));
 
         let fixHunks = [];
         if (benchCase.kind === 'bug') {
