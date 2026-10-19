@@ -1,0 +1,4 @@
+[
+  { "id": "example-bug-1", "base": "0000000", "head": "1111111", "kind": "bug", "fixCommit": "2222222" },
+  { "id": "example-clean-1", "base": "3333333", "head": "4444444", "kind": "clean" }
+]
