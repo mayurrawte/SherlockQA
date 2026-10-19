@@ -28,3 +28,7 @@ tmp/
 temp/
 
 # Note: dist/ is NOT ignored - it's required for GitHub Actions
+
+# Local benchmark data (private code)
+bench/cases.local.json
+bench/results/

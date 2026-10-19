@@ -8944,14 +8944,14 @@ module.exports.YAMLException = __nccwpck_require__(1248);
 // Re-export all types in case user wants to create custom schema
 module.exports.types = {
   binary:    __nccwpck_require__(8149),
-  float:     __nccwpck_require__(5203),
+  float:     __nccwpck_require__(7584),
   map:       __nccwpck_require__(7316),
   null:      __nccwpck_require__(4333),
   pairs:     __nccwpck_require__(6267),
   set:       __nccwpck_require__(8758),
   timestamp: __nccwpck_require__(8966),
   bool:      __nccwpck_require__(7296),
-  int:       __nccwpck_require__(7509),
+  int:       __nccwpck_require__(4652),
   merge:     __nccwpck_require__(6854),
   omap:      __nccwpck_require__(8649),
   seq:       __nccwpck_require__(7161),
@@ -12032,8 +12032,8 @@ module.exports = (__nccwpck_require__(9832).extend)({
   implicit: [
     __nccwpck_require__(4333),
     __nccwpck_require__(7296),
-    __nccwpck_require__(7509),
-    __nccwpck_require__(5203)
+    __nccwpck_require__(4652),
+    __nccwpck_require__(7584)
   ]
 });
 
@@ -12399,7 +12399,7 @@ module.exports = new Type('tag:yaml.org,2002:bool', {
 
 /***/ }),
 
-/***/ 5203:
+/***/ 7584:
 /***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
 
 "use strict";
@@ -12504,7 +12504,7 @@ module.exports = new Type('tag:yaml.org,2002:float', {
 
 /***/ }),
 
-/***/ 7509:
+/***/ 4652:
 /***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
 
 "use strict";
@@ -39752,25 +39752,290 @@ function wrappy (fn, cb) {
 
 /***/ }),
 
-/***/ 5105:
+/***/ 827:
 /***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
 
-/* module decorator */ module = __nccwpck_require__.nmd(module);
 const fs = __nccwpck_require__(9896);
 const path = __nccwpck_require__(6928);
 const core = __nccwpck_require__(7484);
-const github = __nccwpck_require__(3228);
-const OpenAI = __nccwpck_require__(2583);
 const yaml = __nccwpck_require__(4281);
+const { git, hasCheckout, ensureBaseCommit } = __nccwpck_require__(4270);
+
+const DEFAULT_IGNORE_PATTERNS = '*.md,*.txt,package-lock.json,yarn.lock';
+
+// Input resolution: action input > .sherlockqa.yml > '' (code defaults apply
+// at the call sites). action.yml must NOT declare defaults for these keys —
+// the node20 runner pre-fills INPUT_* from action.yml defaults, which would
+// make core.getInput() non-empty and the repo-config fallback unreachable (#9).
+function makeInputResolver(repoConfig) {
+  return (name, opts = {}) => {
+    const fromAction = core.getInput(name, opts);
+    if (fromAction !== '' && fromAction != null) return fromAction;
+    const fromConfig = repoConfig[name];
+    if (fromConfig != null) return String(fromConfig);
+    return '';
+  };
+}
+
+// With a checkout the working tree may hold the PR's code, so config is read from the base commit.
+function loadRepoConfig(baseSha) {
+  const workspace = process.env.GITHUB_WORKSPACE || process.cwd();
+  const candidates = ['.sherlockqa.yml', '.sherlockqa.yaml', '.sherlock.yml'];
+  const fromBase = Boolean(baseSha) && hasCheckout(workspace);
+  if (fromBase && !ensureBaseCommit(workspace, baseSha)) {
+    core.warning('Repository config skipped: the base commit is unavailable.');
+    return {};
+  }
+  for (const name of candidates) {
+    let text;
+    try {
+      text = fromBase ? git(workspace, ['show', `${baseSha}:${name}`]) : fs.readFileSync(path.join(workspace, name), 'utf8');
+    } catch {
+      continue;
+    }
+    try {
+      const parsed = yaml.load(text);
+      if (parsed && typeof parsed === 'object') {
+        core.info(`Loaded config from ${name}`);
+        return parsed;
+      }
+    } catch (e) {
+      core.warning(`Failed to parse ${name}: ${e.message}`);
+    }
+  }
+  return {};
+}
+
+// Glob matcher supporting *, **, ?, and exact substring fallback for legacy patterns.
+function matchPattern(filename, pattern) {
+  if (!pattern) return false;
+  // Exact match
+  if (filename === pattern) return true;
+  // Convert glob to regex
+  if (pattern.includes('*') || pattern.includes('?')) {
+    const regex = globToRegex(pattern);
+    if (regex.test(filename)) return true;
+    // Common case: "*.md" should also match "docs/foo.md"
+    if (pattern.startsWith('*.') && filename.endsWith(pattern.slice(1))) return true;
+    return false;
+  }
+  // Substring fallback (legacy behavior so existing configs keep working)
+  return filename.includes(pattern);
+}
+
+function globToRegex(glob) {
+  let re = '';
+  for (let i = 0; i < glob.length; i++) {
+    const c = glob[i];
+    if (c === '*') {
+      if (glob[i + 1] === '*') {
+        re += '.*'; i++;
+        if (glob[i + 1] === '/') i++;
+      } else {
+        re += '[^/]*';
+      }
+    } else if (c === '?') {
+      re += '[^/]';
+    } else if ('.+^${}()|[]\\'.includes(c)) {
+      re += '\\' + c;
+    } else {
+      re += c;
+    }
+  }
+  return new RegExp('^' + re + '$');
+}
+
+function filterDiff(diffText, ignorePatterns) {
+  const firstHeader = diffText.search(/^diff --git /m);
+  const preamble = firstHeader === -1 ? diffText : diffText.slice(0, firstHeader);
+  const kept = splitDiffByFile(diffText).filter(fileDiff => {
+    let filePath = null;
+    let oldPath = null;
+    let renameTo = null;
+    for (const rawLine of fileDiff.text.split('\n').slice(1)) {
+      const line = rawLine.trimEnd();
+      if (line.startsWith('@@')) break;
+      if (line.startsWith('rename to ')) renameTo = line.slice('rename to '.length);
+      else if (line.startsWith('--- a/')) oldPath = line.slice('--- a/'.length);
+      else if (line.startsWith('+++ b/')) filePath = line.slice('+++ b/'.length);
+      else if (line === '+++ /dev/null') filePath = oldPath;
+    }
+    filePath = filePath || renameTo || fileDiff.file;
+    return !ignorePatterns.some(pattern => matchPattern(filePath, pattern));
+  });
+  return preamble + kept.map(fileDiff => fileDiff.text).join('');
+}
+
+function splitDiffByFile(diffText) {
+  const fileDiffs = [];
+  for (const line of diffText.split(/(?<=\n)/)) {
+    if (line.startsWith('diff --git ')) {
+      const header = line.trimEnd().match(/^diff --git a\/.* b\/(.*)$/);
+      fileDiffs.push({ file: header ? header[1] : line.trimEnd(), text: '' });
+    }
+    if (fileDiffs.length === 0) continue;
+    fileDiffs[fileDiffs.length - 1].text += line;
+  }
+  return fileDiffs;
+}
+
+function groupFileDiffs(fileDiffs, budgetChars) {
+  const dirOf = (file) => file.slice(0, file.lastIndexOf('/') + 1);
+  const sorted = [...fileDiffs].sort((a, b) =>
+    dirOf(a.file).localeCompare(dirOf(b.file)) || b.text.length - a.text.length || a.file.localeCompare(b.file));
+
+  const groups = [];
+  let current = [];
+  let currentSize = 0;
+  for (const fileDiff of sorted) {
+    if (fileDiff.text.length > budgetChars) {
+      if (current.length > 0) groups.push(current);
+      current = [];
+      currentSize = 0;
+      // Split only at @@ hunk boundaries; a single hunk over budget stays whole.
+      const firstHunk = fileDiff.text.indexOf('\n@@') + 1;
+      const header = fileDiff.text.slice(0, firstHunk);
+      const hunks = fileDiff.text.slice(firstHunk).split(/(?=^@@ )/m);
+      let piece = header;
+      for (const hunk of hunks) {
+        if (piece !== header && piece.length + hunk.length > budgetChars) {
+          groups.push([{ file: fileDiff.file, text: piece }]);
+          piece = header;
+        }
+        piece += hunk;
+      }
+      groups.push([{ file: fileDiff.file, text: piece }]);
+      continue;
+    }
+    if (currentSize + fileDiff.text.length > budgetChars) {
+      groups.push(current);
+      current = [];
+      currentSize = 0;
+    }
+    current.push(fileDiff);
+    currentSize += fileDiff.text.length;
+  }
+  if (current.length > 0) groups.push(current);
+  return groups;
+}
+
+module.exports = {
+  DEFAULT_IGNORE_PATTERNS,
+  makeInputResolver,
+  loadRepoConfig,
+  matchPattern,
+  globToRegex,
+  filterDiff,
+  splitDiffByFile,
+  groupFileDiffs,
+};
+
+
+/***/ }),
+
+/***/ 4270:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+const { execFileSync } = __nccwpck_require__(5317);
+
+const RULE_PATHS = ['CLAUDE.md', 'AGENTS.md', 'PATTERNS.md', '.cursorrules', '.github/copilot-instructions.md'];
+const RULES_DIR = '.sherlockqa/rules/';
+
+function git(repoPath, args) {
+  return execFileSync('git', ['-C', repoPath, ...args], {
+    encoding: 'utf8', stdio: 'pipe', maxBuffer: 10 * 1024 * 1024,
+    timeout: 30000, env: { ...process.env, GIT_TERMINAL_PROMPT: '0' }
+  });
+}
+
+function hasCheckout(repoPath) {
+  try {
+    git(repoPath, ['rev-parse', '--git-dir']);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// Config and rules both need the base commit; a failed fetch can take the full timeout, so try it once per run.
+const baseCommitAvailable = new Map();
+
+function ensureBaseCommit(repoPath, baseSha) {
+  const key = `${repoPath}\0${baseSha}`;
+  if (baseCommitAvailable.has(key)) return baseCommitAvailable.get(key);
+  let available = true;
+  try {
+    git(repoPath, ['cat-file', '-e', `${baseSha}^{commit}`]);
+  } catch {
+    try {
+      git(repoPath, ['fetch', '--depth=1', 'origin', baseSha]);
+      git(repoPath, ['cat-file', '-e', `${baseSha}^{commit}`]);
+    } catch {
+      available = false;
+    }
+  }
+  baseCommitAvailable.set(key, available);
+  return available;
+}
+
+function formatRules(rules) {
+  return rules.map(r => `### ${r.path}\n${r.text}`).join('\n\n');
+}
+
+// Reads from the base commit only, so a PR cannot rewrite the rules it is reviewed against.
+function loadRuleFiles({ repoPath, baseSha, budgetChars = 20000 }) {
+  if (!hasCheckout(repoPath)) {
+    return { rules: [], warning: 'No checkout found; add actions/checkout before SherlockQA to apply repository rules.' };
+  }
+
+  if (!ensureBaseCommit(repoPath, baseSha)) {
+    return { rules: [], warning: 'Repository rules skipped: the base commit is unavailable.' };
+  }
+
+  let ruleDirFiles = [];
+  try {
+    ruleDirFiles = git(repoPath, ['ls-tree', '--name-only', baseSha, RULES_DIR])
+      .split('\n').filter(p => p.endsWith('.md')).sort();
+  } catch {
+    ruleDirFiles = [];
+  }
+
+  const rules = [];
+  const skipped = [];
+  let total = 0;
+  for (const filePath of [...RULE_PATHS, ...ruleDirFiles]) {
+    let text;
+    try {
+      text = git(repoPath, ['show', `${baseSha}:${filePath}`]);
+    } catch {
+      continue;
+    }
+    if (total + text.length > budgetChars) {
+      skipped.push(filePath);
+      continue;
+    }
+    total += text.length;
+    rules.push({ path: filePath, text });
+  }
+
+  const warning = skipped.length > 0
+    ? `Repository rules skipped because they exceed the ${budgetChars} character budget: ${skipped.join(', ')}`
+    : null;
+  return { rules, warning };
+}
+
+module.exports = { git, hasCheckout, ensureBaseCommit, formatRules, loadRuleFiles };
+
+
+/***/ }),
+
+/***/ 7727:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+const core = __nccwpck_require__(7484);
 
 const SEVERITY_LEVEL = { suggestion: 1, warning: 2, error: 3 };
 const SEVERITY_EMOJI = { error: '🔴', warning: '🟡', suggestion: '🔵' };
-
-// Hidden markers used to recognize SherlockQA's own output so it can be updated
-// or replaced in place (independent of the use-emoji heading).
-const STICKY_MARKER = '<!-- sherlockqa:sticky -->';
-const REVIEW_MARKER = '<!-- sherlockqa:review -->';
-const COMMENT_MARKER = '<!-- sherlockqa:comment -->';
 
 // Normalize any model-supplied severity to a known tier. Missing or unknown
 // values (e.g. 'critical', 'info', 'nit', undefined) collapse to 'suggestion'
@@ -39819,68 +40084,76 @@ function filterAndRouteComments(comments, { minConfidence, minSeverity, maxComme
   return { inline, minorNotes };
 }
 
-// Decide which review event to submit. Auto-APPROVE is only ever allowed on
-// same-repo `pull_request` events: on `pull_request_target` the diff comes from
-// an untrusted fork and could steer the verdict via prompt injection, so an
-// approved verdict there degrades to a plain COMMENT.
-function resolveReviewEvent(verdict, autoApprove, eventName) {
-  if (verdict === 'approved' && autoApprove && eventName === 'pull_request') return 'APPROVE';
-  if (verdict === 'do_not_merge') return 'REQUEST_CHANGES';
-  return 'COMMENT';
-}
-
-// Decide whether to submit a formal PR review, and with what body. Returns null
-// when none should be posted — critically, the COMMENT verdict with the sticky
-// comment enabled posts NO review (COMMENTED reviews can't be dismissed and would
-// stack on every push). Only the dismissable terminal events, or the sticky-off
-// fallback, produce a review.
-function planFormalReview(event, updateSummaryComment, body) {
-  if (event === 'APPROVE' || event === 'REQUEST_CHANGES') {
-    const badge = event === 'APPROVE'
-      ? '✅ **SherlockQA approved this PR.**'
-      : '❌ **SherlockQA requested changes.**';
+function parseReviewResponse(content) {
+  // Coerce first: a refusal / content-filter returns null content, and calling
+  // .trim() on it would throw *outside* the try below (uncatchable) and fail the
+  // whole action. An empty string simply flows into the safe fallback.
+  const raw = content == null ? '' : String(content);
+  let jsonContent = raw.trim();
+  const jsonMatch = raw.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
+  if (jsonMatch) jsonContent = jsonMatch[1];
+  try {
+    return JSON.parse(jsonContent);
+  } catch (e) {
+    // Best-effort: extract first {...} block
+    const braceMatch = raw.match(/\{[\s\S]*\}/);
+    if (braceMatch) {
+      try { return JSON.parse(braceMatch[0]); } catch (_) { /* fall through */ }
+    }
+    core.warning(`Failed to parse AI response: ${e.message}`);
+    core.warning(`Raw response: ${raw.slice(0, 500)}`);
     return {
-      event,
-      body: updateSummaryComment
-        ? `${REVIEW_MARKER}\n${badge}\n\nSee the SherlockQA summary comment for details.`
-        : `${REVIEW_MARKER}\n${body}`
+      summary: 'Unable to parse AI response',
+      line_comments: [],
+      tests_required: false,
+      test_suggestion: '',
+      qa_scenarios: [],
+      questions: [],
+      verdict: 'needs_changes'
     };
   }
-  if (!updateSummaryComment) {
-    return { event: 'COMMENT', body: `${REVIEW_MARKER}\n${body}` };
+}
+
+function countSeverity(comments) {
+  const counts = { error: 0, warning: 0, suggestion: 0 };
+  for (const c of comments) {
+    counts[normalizeSeverity(c.severity)]++;
   }
-  return null;
+  return counts;
 }
 
-// After a formal review submission fails (e.g. 422 "GitHub Actions is not
-// permitted to approve pull requests"), decide the degraded retry (#6). With
-// the sticky summary disabled the body would otherwise be lost, so fall back
-// to a plain COMMENT review. With the sticky ON, the summary is already
-// posted there — a COMMENT review would just re-create the undismissable
-// pile-up (#21), so no retry.
-function planReviewFallback(plan, updateSummaryComment) {
-  if (updateSummaryComment || plan.event === 'COMMENT') return null;
-  return { event: 'COMMENT', body: plan.body };
-}
+module.exports = {
+  SEVERITY_LEVEL,
+  SEVERITY_EMOJI,
+  normalizeSeverity,
+  normalizeConfidence,
+  filterAndRouteComments,
+  parseReviewResponse,
+  countSeverity,
+};
 
-// Input resolution: action input > .sherlockqa.yml > '' (code defaults apply
-// at the call sites). action.yml must NOT declare defaults for these keys —
-// the node20 runner pre-fills INPUT_* from action.yml defaults, which would
-// make core.getInput() non-empty and the repo-config fallback unreachable (#9).
-function makeInputResolver(repoConfig) {
-  return (name, opts = {}) => {
-    const fromAction = core.getInput(name, opts);
-    if (fromAction !== '' && fromAction != null) return fromAction;
-    const fromConfig = repoConfig[name];
-    if (fromConfig != null) return String(fromConfig);
-    return '';
-  };
-}
+
+/***/ }),
+
+/***/ 5105:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+const core = __nccwpck_require__(7484);
+const github = __nccwpck_require__(3228);
+const { SEVERITY_EMOJI, normalizeSeverity, normalizeConfidence, filterAndRouteComments, parseReviewResponse, countSeverity } = __nccwpck_require__(7727);
+const { DEFAULT_IGNORE_PATTERNS, makeInputResolver, loadRepoConfig, matchPattern, globToRegex, filterDiff } = __nccwpck_require__(827);
+const { defaultModelFor, reviewDiff, estimateCost, buildSystemPrompt, buildUserPrompt } = __nccwpck_require__(1565);
+const { loadRuleFiles, formatRules } = __nccwpck_require__(4270);
+const { REVIEW_MARKER, isSherlockReview, findPreviousState, syncInlineComments, buildReviewBody, parseDiffForLinePositions, upsertStickyComment, createCheckRunSafely, isScenarioPreviouslyChecked } = __nccwpck_require__(2090);
+const { callAnthropic } = __nccwpck_require__(9524);
+const { callBedrock } = __nccwpck_require__(7594);
+const { callOllama } = __nccwpck_require__(212);
 
 async function run() {
   try {
+    const baseSha = github.context.payload.pull_request?.base?.sha;
     // Load .sherlockqa.yml from the workspace if present. Action inputs always win.
-    const repoConfig = loadRepoConfig();
+    const repoConfig = loadRepoConfig(baseSha);
     const getInput = makeInputResolver(repoConfig);
 
     const githubToken = core.getInput('github-token', { required: true });
@@ -39897,7 +40170,7 @@ async function run() {
       core.warning('Invalid min-confidence input; falling back to default (0.6).');
       minConfidence = 0.6;
     }
-    const ignorePatterns = (getInput('ignore-patterns') || '*.md,*.txt,package-lock.json,yarn.lock')
+    const ignorePatterns = (getInput('ignore-patterns') || DEFAULT_IGNORE_PATTERNS)
       .split(',').map(p => p.trim()).filter(Boolean);
     const persona = getInput('persona') || '';
     const domainKnowledge = getInput('domain-knowledge') || '';
@@ -39933,29 +40206,35 @@ async function run() {
       mediaType: { format: 'diff' }
     });
 
-    const { data: files } = await octokit.rest.pulls.listFiles({
-      owner, repo, pull_number: prNumber
+    const files = await octokit.paginate(octokit.rest.pulls.listFiles, {
+      owner, repo, pull_number: prNumber, per_page: 100
     });
 
     const filesToReview = files.filter(file =>
       !ignorePatterns.some(pattern => matchPattern(file.filename, pattern))
     );
 
-    if (filesToReview.length === 0) {
+    const filteredDiff = filterDiff(diff, ignorePatterns);
+    if (filesToReview.length === 0 || !filteredDiff) {
       core.info('No files to review after filtering');
       return;
     }
 
     core.info(`Reviewing ${filesToReview.length} files`);
 
-    const MAX_DIFF_CHARS = 50000;
-    const truncated = diff.length > MAX_DIFF_CHARS;
-    const diffContent = truncated ? diff.slice(0, MAX_DIFF_CHARS) + '\n\n... [diff truncated]' : diff;
+    const { rules, warning: rulesWarning } = loadRuleFiles({
+      repoPath: process.env.GITHUB_WORKSPACE || process.cwd(),
+      baseSha
+    });
+    if (rulesWarning) core.warning(rulesWarning);
+    const repoRules = formatRules(rules);
 
-    const { review, usage, responseTruncated } = await getAIReview({
-      provider: aiProvider, model, diff: diffContent, files: filesToReview,
-      prAuthor, persona, domainKnowledge, maxTokens, codeQuality,
-      personality, strictness: reviewStrictness, mode, maxComments
+    const { review, usage, truncated, responseTruncated, failedFiles } = await reviewDiff({
+      diff: filteredDiff, files: filesToReview,
+      config: {
+        provider: aiProvider, model, prAuthor, persona, domainKnowledge, maxTokens,
+        codeQuality, personality, strictness: reviewStrictness, mode, maxComments, repoRules
+      }
     });
 
     const cost = estimateCost(model, usage);
@@ -39989,7 +40268,7 @@ async function run() {
     }
 
     const severityCounts = countSeverity(routed.inline);
-    const body = buildReviewBody(review, prAuthor, previousCheckedScenarios, reviewStyle, useEmoji, truncated, severityCounts, responseTruncated, routed.minorNotes);
+    const body = buildReviewBody(review, prAuthor, previousCheckedScenarios, reviewStyle, useEmoji, truncated, severityCounts, responseTruncated, routed.minorNotes, failedFiles);
 
     if (autoApprove && review.verdict === 'approved' && context.eventName !== 'pull_request') {
       core.warning('auto-approve is disabled outside same-repo pull_request events (e.g. pull_request_target): the fork diff is untrusted and could steer the verdict via prompt injection. Posting a COMMENT instead.');
@@ -40057,39 +40336,410 @@ async function run() {
   }
 }
 
-function loadRepoConfig() {
-  const workspace = process.env.GITHUB_WORKSPACE || process.cwd();
-  const candidates = ['.sherlockqa.yml', '.sherlockqa.yaml', '.sherlock.yml'];
-  for (const name of candidates) {
-    const p = path.join(workspace, name);
-    if (fs.existsSync(p)) {
-      try {
-        const parsed = yaml.load(fs.readFileSync(p, 'utf8'));
-        if (parsed && typeof parsed === 'object') {
-          core.info(`Loaded config from ${name}`);
-          return parsed;
+// Decide which review event to submit. Auto-APPROVE is only ever allowed on
+// same-repo `pull_request` events: on `pull_request_target` the diff comes from
+// an untrusted fork and could steer the verdict via prompt injection, so an
+// approved verdict there degrades to a plain COMMENT.
+function resolveReviewEvent(verdict, autoApprove, eventName) {
+  if (verdict === 'approved' && autoApprove && eventName === 'pull_request') return 'APPROVE';
+  if (verdict === 'do_not_merge') return 'REQUEST_CHANGES';
+  return 'COMMENT';
+}
+
+// Decide whether to submit a formal PR review, and with what body. Returns null
+// when none should be posted — critically, the COMMENT verdict with the sticky
+// comment enabled posts NO review (COMMENTED reviews can't be dismissed and would
+// stack on every push). Only the dismissable terminal events, or the sticky-off
+// fallback, produce a review.
+function planFormalReview(event, updateSummaryComment, body) {
+  if (event === 'APPROVE' || event === 'REQUEST_CHANGES') {
+    const badge = event === 'APPROVE'
+      ? '✅ **SherlockQA approved this PR.**'
+      : '❌ **SherlockQA requested changes.**';
+    return {
+      event,
+      body: updateSummaryComment
+        ? `${REVIEW_MARKER}\n${badge}\n\nSee the SherlockQA summary comment for details.`
+        : `${REVIEW_MARKER}\n${body}`
+    };
+  }
+  if (!updateSummaryComment) {
+    return { event: 'COMMENT', body: `${REVIEW_MARKER}\n${body}` };
+  }
+  return null;
+}
+
+// After a formal review submission fails (e.g. 422 "GitHub Actions is not
+// permitted to approve pull requests"), decide the degraded retry (#6). With
+// the sticky summary disabled the body would otherwise be lost, so fall back
+// to a plain COMMENT review. With the sticky ON, the summary is already
+// posted there — a COMMENT review would just re-create the undismissable
+// pile-up (#21), so no retry.
+function planReviewFallback(plan, updateSummaryComment) {
+  if (updateSummaryComment || plan.event === 'COMMENT') return null;
+  return { event: 'COMMENT', body: plan.body };
+}
+
+// Execute only when run directly (node dist/index.js). When required by the test
+// suite the pure helpers are exposed instead, so importing never runs the action.
+if (require.main === require.cache[eval('__filename')]) {
+  run();
+}
+
+module.exports = {
+  makeInputResolver,
+  normalizeSeverity,
+  normalizeConfidence,
+  filterAndRouteComments,
+  resolveReviewEvent,
+  planFormalReview,
+  planReviewFallback,
+  parseReviewResponse,
+  parseDiffForLinePositions,
+  countSeverity,
+  estimateCost,
+  matchPattern,
+  globToRegex,
+  isScenarioPreviouslyChecked,
+  isSherlockReview,
+  buildSystemPrompt,
+  buildUserPrompt,
+  buildReviewBody,
+  reviewDiff,
+  callAnthropic,
+  callOllama,
+  callBedrock,
+  defaultModelFor,
+};
+
+
+/***/ }),
+
+/***/ 9524:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+const core = __nccwpck_require__(7484);
+
+async function callAnthropic(systemPrompt, userPrompt, model, maxTokens) {
+  const apiKey = core.getInput('anthropic-api-key', { required: true });
+  const url = 'https://api.anthropic.com/v1/messages';
+  // Nudge JSON output by appending a leading "{" assistant turn (Anthropic trick).
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-api-key': apiKey,
+      'anthropic-version': '2023-06-01'
+    },
+    body: JSON.stringify({
+      model,
+      max_tokens: maxTokens,
+      temperature: 0.3,
+      system: systemPrompt,
+      messages: [
+        { role: 'user', content: userPrompt },
+        { role: 'assistant', content: '{' }
+      ]
+    })
+  });
+  if (!response.ok) {
+    const err = new Error(`Anthropic API: ${response.status} - ${await response.text()}`);
+    err.status = response.status;
+    throw err;
+  }
+  const result = await response.json();
+  const text = (result.content || []).filter(c => c.type === 'text').map(c => c.text).join('');
+  // We pre-filled "{", so prepend it back when parsing.
+  return {
+    content: '{' + text,
+    truncated: result.stop_reason === 'max_tokens',
+    usage: {
+      input: result.usage?.input_tokens || 0,
+      output: result.usage?.output_tokens || 0
+    }
+  };
+}
+
+module.exports = {
+  callAnthropic,
+};
+
+
+/***/ }),
+
+/***/ 3291:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+const core = __nccwpck_require__(7484);
+const OpenAI = __nccwpck_require__(2583);
+
+async function callAzureOpenAI(systemPrompt, userPrompt, model, maxTokens) {
+  const apiKey = core.getInput('azure-api-key', { required: true });
+  const endpoint = core.getInput('azure-endpoint', { required: true });
+  const deployment = core.getInput('azure-deployment') || model;
+  const apiVersion = core.getInput('azure-api-version') || '2024-02-15-preview';
+  const client = new OpenAI({
+    apiKey,
+    baseURL: `${endpoint}/openai/deployments/${deployment}`,
+    defaultQuery: { 'api-version': apiVersion },
+    defaultHeaders: { 'api-key': apiKey }
+  });
+  const response = await client.chat.completions.create({
+    model: deployment,
+    messages: [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: userPrompt }
+    ],
+    max_tokens: maxTokens,
+    temperature: 0.3,
+    response_format: { type: 'json_object' }
+  });
+  return {
+    content: response.choices[0].message.content,
+    truncated: response.choices[0].finish_reason === 'length',
+    usage: {
+      input: response.usage?.prompt_tokens || 0,
+      output: response.usage?.completion_tokens || 0
+    }
+  };
+}
+
+async function callAzureResponsesAPI(systemPrompt, userPrompt, model, maxTokens) {
+  const apiKey = core.getInput('azure-api-key', { required: true });
+  const endpoint = core.getInput('azure-endpoint', { required: true });
+  const apiVersion = core.getInput('azure-api-version') || '2025-04-01-preview';
+  const fullPrompt = `${systemPrompt}\n\n---\n\n${userPrompt}`;
+  const url = `${endpoint}/openai/responses?api-version=${apiVersion}`;
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${apiKey}`
+    },
+    body: JSON.stringify({ input: fullPrompt, max_output_tokens: maxTokens, model })
+  });
+  if (!response.ok) {
+    const err = new Error(`Azure Responses API: ${response.status} - ${await response.text()}`);
+    err.status = response.status;
+    throw err;
+  }
+  const result = await response.json();
+  let content = '';
+  if (Array.isArray(result.output)) {
+    for (const item of result.output) {
+      if (item.type === 'message' && item.content) {
+        for (const c of item.content) {
+          if (c.type === 'output_text') content += c.text || '';
         }
-      } catch (e) {
-        core.warning(`Failed to parse ${name}: ${e.message}`);
       }
     }
   }
-  return {};
+  if (!content) throw new Error(`Unparseable Azure Responses output: ${JSON.stringify(result).slice(0, 500)}`);
+  return {
+    content,
+    truncated: result.status === 'incomplete',
+    usage: {
+      input: result.usage?.input_tokens || result.usage?.prompt_tokens || 0,
+      output: result.usage?.output_tokens || result.usage?.completion_tokens || 0
+    }
+  };
 }
 
-function defaultModelFor(provider) {
-  switch (provider) {
-    case 'anthropic': return 'claude-sonnet-4-5';
-    // Inference-profile form: newer Claude models on Bedrock reject the bare
-    // anthropic. ID with "on-demand throughput isn't supported" (verified live).
-    case 'bedrock': return 'us.anthropic.claude-sonnet-5';
-    case 'gemini': return 'gemini-2.0-flash';
-    case 'ollama': return 'llama3.1';
-    case 'azure':
-    case 'azure-responses': return 'gpt-4o-mini';
-    default: return 'gpt-4o-mini';
+module.exports = {
+  callAzureOpenAI,
+  callAzureResponsesAPI,
+};
+
+
+/***/ }),
+
+/***/ 7594:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+const core = __nccwpck_require__(7484);
+
+async function callBedrock(systemPrompt, userPrompt, model, maxTokens) {
+  const apiKey = core.getInput('bedrock-api-key', { required: true });
+  const region = core.getInput('aws-region') || 'us-east-1';
+  // Converse API is model-agnostic (Claude, Llama, Mistral, Nova...). Bearer
+  // auth uses a Bedrock API key — SigV4/IAM-role auth is intentionally not
+  // supported to keep the zero-SDK fetch pattern.
+  const url = `https://bedrock-runtime.${region}.amazonaws.com/model/${encodeURIComponent(model)}/converse`;
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${apiKey}`
+    },
+    body: JSON.stringify({
+      system: [{ text: systemPrompt }],
+      messages: [{ role: 'user', content: [{ text: userPrompt }] }],
+      inferenceConfig: { maxTokens, temperature: 0.3 }
+    })
+  });
+  if (!response.ok) {
+    const err = new Error(`Bedrock API: ${response.status} - ${await response.text()}`);
+    err.status = response.status;
+    throw err;
   }
+  const result = await response.json();
+  const blocks = result.output?.message?.content || [];
+  const text = blocks.filter(b => typeof b.text === 'string').map(b => b.text).join('');
+  return {
+    content: text,
+    truncated: result.stopReason === 'max_tokens',
+    usage: {
+      input: result.usage?.inputTokens || 0,
+      output: result.usage?.outputTokens || 0
+    }
+  };
 }
+
+module.exports = {
+  callBedrock,
+};
+
+
+/***/ }),
+
+/***/ 149:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+const core = __nccwpck_require__(7484);
+
+async function callGemini(systemPrompt, userPrompt, model, maxTokens) {
+  const apiKey = core.getInput('gemini-api-key', { required: true });
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      systemInstruction: { parts: [{ text: systemPrompt }] },
+      contents: [{ role: 'user', parts: [{ text: userPrompt }] }],
+      generationConfig: {
+        temperature: 0.3,
+        maxOutputTokens: maxTokens,
+        responseMimeType: 'application/json'
+      }
+    })
+  });
+  if (!response.ok) {
+    const err = new Error(`Gemini API: ${response.status} - ${await response.text()}`);
+    err.status = response.status;
+    throw err;
+  }
+  const result = await response.json();
+  const text = result.candidates?.[0]?.content?.parts?.map(p => p.text).join('') || '';
+  if (!text) throw new Error(`Empty Gemini response: ${JSON.stringify(result).slice(0, 500)}`);
+  return {
+    content: text,
+    truncated: result.candidates?.[0]?.finishReason === 'MAX_TOKENS',
+    usage: {
+      input: result.usageMetadata?.promptTokenCount || 0,
+      output: result.usageMetadata?.candidatesTokenCount || 0
+    }
+  };
+}
+
+module.exports = {
+  callGemini,
+};
+
+
+/***/ }),
+
+/***/ 212:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+const core = __nccwpck_require__(7484);
+
+async function callOllama(systemPrompt, userPrompt, model, maxTokens) {
+  const baseUrl = core.getInput('ollama-base-url') || 'http://localhost:11434';
+  const url = `${baseUrl.replace(/\/$/, '')}/api/chat`;
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      model,
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: userPrompt }
+      ],
+      stream: false,
+      format: 'json',
+      options: { temperature: 0.3, num_predict: maxTokens }
+    })
+  });
+  if (!response.ok) {
+    const err = new Error(`Ollama API: ${response.status} - ${await response.text()}`);
+    err.status = response.status;
+    throw err;
+  }
+  const result = await response.json();
+  return {
+    content: result.message?.content || '',
+    truncated: result.done_reason === 'length',
+    usage: {
+      input: result.prompt_eval_count || 0,
+      output: result.eval_count || 0
+    }
+  };
+}
+
+module.exports = {
+  callOllama,
+};
+
+
+/***/ }),
+
+/***/ 2695:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+const core = __nccwpck_require__(7484);
+const OpenAI = __nccwpck_require__(2583);
+
+async function callOpenAI(systemPrompt, userPrompt, model, maxTokens) {
+  const apiKey = core.getInput('openai-api-key', { required: true });
+  const client = new OpenAI({ apiKey });
+  const response = await client.chat.completions.create({
+    model,
+    messages: [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: userPrompt }
+    ],
+    max_tokens: maxTokens,
+    temperature: 0.3,
+    response_format: { type: 'json_object' }
+  });
+  return {
+    content: response.choices[0].message.content,
+    truncated: response.choices[0].finish_reason === 'length',
+    usage: {
+      input: response.usage?.prompt_tokens || 0,
+      output: response.usage?.completion_tokens || 0
+    }
+  };
+}
+
+module.exports = {
+  callOpenAI,
+};
+
+
+/***/ }),
+
+/***/ 2090:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+const core = __nccwpck_require__(7484);
+const { SEVERITY_EMOJI, normalizeSeverity } = __nccwpck_require__(7727);
+
+// Hidden markers used to recognize SherlockQA's own output so it can be updated
+// or replaced in place (independent of the use-emoji heading).
+const STICKY_MARKER = '<!-- sherlockqa:sticky -->';
+const REVIEW_MARKER = '<!-- sherlockqa:review -->';
+const COMMENT_MARKER = '<!-- sherlockqa:comment -->';
 
 // Matches SherlockQA's own review/comment output regardless of the use-emoji
 // setting: the heading is "## 🔍 SherlockQA's Review" or "## [SHERLOCK] SherlockQA's
@@ -40184,12 +40834,452 @@ async function syncInlineComments(octokit, owner, repo, prNumber, commitSha, com
   return posted;
 }
 
+function formatSeverityBreakdown(counts, useEmoji) {
+  const parts = [];
+  const errIcon = useEmoji ? '🔴' : 'E';
+  const warnIcon = useEmoji ? '🟡' : 'W';
+  const suggIcon = useEmoji ? '🔵' : 'S';
+  if (counts.error) parts.push(`${counts.error} ${errIcon}`);
+  if (counts.warning) parts.push(`${counts.warning} ${warnIcon}`);
+  if (counts.suggestion) parts.push(`${counts.suggestion} ${suggIcon}`);
+  return parts.join(' · ');
+}
+
+// Renders the collapsed "Minor notes" block. Entries are usually suggestion-
+// severity nits ("no action required"), but overflow from the max-comments
+// cap can push error/warning findings in here too (I4) — those must not be
+// mislabeled as harmless, so the header drops the "no action required" claim
+// and each entry carries its real severity emoji.
+function formatMinorNotesBlock(minorNotes, e) {
+  const hasOverBudget = minorNotes.some(n => normalizeSeverity(n.severity) !== 'suggestion');
+  const headerSuffix = hasOverBudget
+    ? ` — includes ${minorNotes.filter(n => normalizeSeverity(n.severity) !== 'suggestion').length} over-budget findings`
+    : ' — low-severity, no action required';
+  const lines = ['<details>'];
+  lines.push(`<summary>${e.quality} <b>Minor notes (${minorNotes.length})</b>${headerSuffix}</summary>\n`);
+  minorNotes.forEach(n => {
+    const emoji = SEVERITY_EMOJI[normalizeSeverity(n.severity)] || '🔵';
+    lines.push(`- ${emoji} \`${n.file}:${n.line}\` — ${n.comment}`);
+  });
+  lines.push('\n</details>\n');
+  return lines;
+}
+
+function buildReviewBody(review, prAuthor, previousCheckedScenarios = new Set(), reviewStyle = 'compact', useEmoji = true, truncated = false, severityCounts = null, responseTruncated = false, minorNotes = [], failedFiles = []) {
+  const e = useEmoji ? {
+    detective: '🔍', summary: '📝', tests: '🧪', qa: '🎯', questions: '❓',
+    quality: '🧹', verdict: '🏁', approved: '✅', needs_changes: '⚠️',
+    do_not_merge: '❌', warning: '⚠️'
+  } : {
+    detective: '[SHERLOCK]', summary: '[SUMMARY]', tests: '[TESTS]', qa: '[QA]',
+    questions: '[?]', quality: '[QUALITY]', verdict: '[VERDICT]', approved: '[OK]',
+    needs_changes: '[CHANGES]', do_not_merge: '[STOP]', warning: '[!]'
+  };
+
+  const verdictEmoji = { approved: e.approved, needs_changes: e.needs_changes, do_not_merge: e.do_not_merge };
+  const verdictText = { approved: 'Approved', needs_changes: 'Needs Changes', do_not_merge: 'Do Not Merge' };
+
+  const issueCount = review.line_comments?.length || 0;
+  const qaCount = review.qa_scenarios?.length || 0;
+  const questionCount = review.questions?.length || 0;
+  const severityStr = severityCounts && issueCount > 0
+    ? ` (${formatSeverityBreakdown(severityCounts, useEmoji)})`
+    : '';
+  const minorNotesStr = minorNotes.length > 0 ? ` · +${minorNotes.length} minor note${minorNotes.length === 1 ? '' : 's'}` : '';
+  const failedFilesBanner = `> ${e.warning} **Heads up:** the AI review failed for ${failedFiles.join(', ')} — these files were not reviewed.\n`;
+
+  const parts = [];
+
+  if (reviewStyle === 'compact') {
+    const isApproved = review.verdict === 'approved';
+    const isCleanApproval = isApproved && issueCount === 0 && questionCount === 0 && minorNotes.length === 0;
+    // QA is suppressed on approvals below (M7) — don't advertise a count for a
+    // section that never renders in this style.
+    const qaStr = isApproved ? '' : ` · ${qaCount} QA scenarios`;
+    parts.push(`## ${e.detective} SherlockQA's Review\n`);
+    parts.push(`**Verdict:** ${verdictEmoji[review.verdict] || e.needs_changes} ${verdictText[review.verdict] || review.verdict} | ${issueCount} issues${severityStr}${minorNotesStr}${qaStr}${questionCount > 0 ? ` · ${questionCount} questions` : ''}\n`);
+    if (review.verdict_reason) parts.push(`> ${review.verdict_reason}\n`);
+
+    if (failedFiles.length > 0) {
+      parts.push(failedFilesBanner);
+    } else if (truncated) {
+      parts.push(`> ${e.warning} **Heads up:** PR diff was large and got truncated — this review may have missed parts of the change. Consider splitting large PRs.\n`);
+    }
+
+    if (responseTruncated) {
+      parts.push(`> ${e.warning} **Heads up:** the AI response hit the \`max-tokens\` limit and was cut off — findings may be missing and the verdict may be unreliable. Raise \`max-tokens\` in your workflow.\n`);
+    }
+
+    if (!isCleanApproval) {
+      parts.push(`**Summary:** ${review.summary || 'No summary'}\n`);
+
+      if (review.code_quality && review.code_quality !== 'null') {
+        const qualityText = typeof review.code_quality === 'string'
+          ? review.code_quality
+          : review.code_quality.summary || '';
+        if (qualityText && qualityText !== 'null') {
+          parts.push(`**Code Quality:** ${qualityText}\n`);
+        }
+      }
+
+      if (review.tests_required && review.test_suggestion) {
+        parts.push('<details>');
+        parts.push(`<summary>${e.tests} <b>Tests Suggested</b></summary>\n`);
+        parts.push(`${review.test_suggestion}\n`);
+        parts.push('</details>\n');
+      }
+
+      if (!isApproved && review.qa_scenarios?.length > 0) {
+        parts.push('<details>');
+        parts.push(`<summary>${e.qa} <b>QA Scenarios (${qaCount})</b></summary>\n`);
+        review.qa_scenarios.forEach(scenario => {
+          const isChecked = isScenarioPreviouslyChecked(scenario, previousCheckedScenarios);
+          const checkbox = isChecked ? '[x]' : '[ ]';
+          parts.push(`- ${checkbox} ${scenario}`);
+        });
+        parts.push('\n</details>\n');
+      }
+
+      if (!isApproved && review.questions?.length > 0) {
+        parts.push(`**${e.questions} Questions:** ${review.questions.join(' | ')}\n`);
+      }
+    }
+
+    if (minorNotes.length > 0) {
+      parts.push(...formatMinorNotesBlock(minorNotes, e));
+    }
+  } else {
+    parts.push(`## ${e.detective} SherlockQA's Review\n`);
+    parts.push(`### ${e.summary} Summary\n${review.summary || 'No summary'}\n`);
+
+    if (failedFiles.length > 0) {
+      parts.push(failedFilesBanner);
+    } else if (truncated) {
+      parts.push(`> ${e.warning} **Heads up:** PR diff was large and got truncated — this review may have missed parts of the change.\n`);
+    }
+
+    if (responseTruncated) {
+      parts.push(`> ${e.warning} **Heads up:** the AI response hit the \`max-tokens\` limit and was cut off — findings may be missing and the verdict may be unreliable. Raise \`max-tokens\` in your workflow.\n`);
+    }
+
+    if (review.tests_required && review.test_suggestion) {
+      parts.push(`### ${e.tests} Tests Required`);
+      parts.push(`${e.warning} **@${prAuthor}** - Please add test cases for this change:\n`);
+      parts.push(`${review.test_suggestion}\n`);
+    }
+
+    if (review.qa_scenarios?.length > 0) {
+      parts.push(`### ${e.qa} QA Test Scenarios`);
+      review.qa_scenarios.forEach(scenario => {
+        const isChecked = isScenarioPreviouslyChecked(scenario, previousCheckedScenarios);
+        const checkbox = isChecked ? '[x]' : '[ ]';
+        parts.push(`- ${checkbox} ${scenario}`);
+      });
+      parts.push('');
+    }
+
+    if (review.questions?.length > 0) {
+      parts.push(`### ${e.questions} Questions`);
+      review.questions.forEach(q => parts.push(`- ${q}`));
+      parts.push('');
+    }
+
+    if (review.code_quality && review.code_quality !== 'null') {
+      const qualityText = typeof review.code_quality === 'string'
+        ? review.code_quality
+        : review.code_quality.summary || '';
+      if (qualityText && qualityText !== 'null') {
+        parts.push(`### ${e.quality} Code Quality`);
+        parts.push(`${qualityText}\n`);
+      }
+      if (typeof review.code_quality === 'object' && review.code_quality.issues?.length > 0) {
+        review.code_quality.issues.forEach(issue => parts.push(`- ${issue}`));
+        parts.push('');
+      }
+    }
+
+    parts.push(`### ${e.verdict} Verdict\n${verdictEmoji[review.verdict] || e.needs_changes} ${verdictText[review.verdict] || review.verdict}${minorNotesStr}`);
+    if (review.verdict_reason) parts.push(`\n> ${review.verdict_reason}`);
+
+    if (minorNotes.length > 0) {
+      parts.push(...formatMinorNotesBlock(minorNotes, e));
+    }
+  }
+
+  return parts.join('\n');
+}
+
+function parseDiffForLinePositions(diffText) {
+  const fileLineMap = {};
+  let currentFile = null;
+  let diffPosition = 0;
+  let currentNewLine = 0;
+  let inHunk = false;
+
+  for (const line of diffText.split('\n')) {
+    // Every file section starts with "diff --git". Leaving the previous file
+    // here guarantees its header lines (index, --- a/, +++ b/) can never be
+    // recorded as the previous file's trailing positions (#7).
+    if (line.startsWith('diff --git ')) {
+      currentFile = null;
+      inHunk = false;
+      continue;
+    }
+
+    if (!currentFile) {
+      // Only "+++ b/<path>" opens an addressable file. "+++ /dev/null"
+      // (deleted file) has no new side, so its hunks stay unaddressable.
+      if (line.startsWith('+++ b/')) {
+        currentFile = line.slice(6);
+        fileLineMap[currentFile] = {};
+        diffPosition = 0; // GitHub positions count per file, from its first @@
+      }
+      continue;
+    }
+
+    const hunkMatch = line.match(/^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
+    if (hunkMatch) {
+      currentNewLine = parseInt(hunkMatch[1], 10);
+      diffPosition++;
+      inHunk = true;
+      continue;
+    }
+    if (!inHunk) continue;
+
+    // Inside a hunk, +/- prefixes always mean content — a real next-file
+    // "+++ b/" can't appear here because "diff --git" resets inHunk first.
+    if (line.startsWith('+')) {
+      fileLineMap[currentFile][currentNewLine] = diffPosition;
+      currentNewLine++;
+      diffPosition++;
+    } else if (line.startsWith('-')) {
+      diffPosition++;
+    } else if (line.startsWith('\\')) {
+      // "\ No newline at end of file" occupies a diff line — it counts toward
+      // position but maps to no new-side line.
+      diffPosition++;
+    } else {
+      fileLineMap[currentFile][currentNewLine] = diffPosition;
+      currentNewLine++;
+      diffPosition++;
+    }
+  }
+  return fileLineMap;
+}
+
+async function upsertStickyComment(octokit, owner, repo, prNumber, body) {
+  const stickyBody = `${STICKY_MARKER}\n${body}`;
+  try {
+    const comments = await octokit.paginate(octokit.rest.issues.listComments, {
+      owner, repo, issue_number: prNumber, per_page: 100
+    });
+    const existing = comments.find(c => c.body && c.body.includes(STICKY_MARKER));
+    if (existing) {
+      await octokit.rest.issues.updateComment({
+        owner, repo, comment_id: existing.id, body: stickyBody
+      });
+      core.info(`Updated sticky comment #${existing.id}`);
+    } else {
+      await octokit.rest.issues.createComment({
+        owner, repo, issue_number: prNumber, body: stickyBody
+      });
+      core.info('Created sticky comment');
+    }
+  } catch (e) {
+    core.warning(`Failed to upsert sticky comment: ${e.message}`);
+  }
+}
+
+async function createCheckRunSafely(opts) {
+  const { octokit, owner, repo, commitSha, review, severityCounts,
+    usage, cost, model, aiProvider, truncated, responseTruncated } = opts;
+
+  const conclusion =
+    review.verdict === 'do_not_merge' ? 'failure' :
+    review.verdict === 'needs_changes' ? 'neutral' :
+    review.verdict === 'approved' ? 'success' : 'neutral';
+
+  const titleByVerdict = {
+    approved: 'Approved — no blocking issues',
+    needs_changes: 'Needs changes',
+    do_not_merge: 'Do not merge'
+  };
+
+  const issueCount = (review.line_comments || []).length;
+  const summaryLines = [
+    `**Verdict:** ${review.verdict}`,
+    `**Issues:** ${issueCount} (${severityCounts.error}🔴 · ${severityCounts.warning}🟡 · ${severityCounts.suggestion}🔵)`,
+    `**Model:** ${aiProvider} / ${model}`,
+    `**Tokens:** ${usage.input} in / ${usage.output} out${cost != null ? ` · ~$${cost.toFixed(4)}` : ''}`
+  ];
+  if (truncated) summaryLines.push('> ⚠️ PR diff truncated — review may be incomplete.');
+  if (responseTruncated) summaryLines.push('> ⚠️ AI response hit max-tokens — review may be incomplete.');
+  if (review.summary) summaryLines.push('', review.summary);
+  if (review.verdict_reason) summaryLines.push('', `> ${review.verdict_reason}`);
+
+  // Map review comments back to annotations (file + line). The review API uses
+  // diff "position" for inline comments, but the Checks API needs file path + line.
+  const annotations = [];
+  for (const c of (review.line_comments || [])) {
+    if (!c.file || !c.line) continue;
+    const level = c.severity === 'error' ? 'failure'
+      : c.severity === 'warning' ? 'warning' : 'notice';
+    annotations.push({
+      path: c.file,
+      start_line: c.line,
+      end_line: c.line,
+      annotation_level: level,
+      message: c.comment || ''
+    });
+    if (annotations.length >= 50) break; // Checks API limit per request
+  }
+
+  try {
+    await octokit.rest.checks.create({
+      owner, repo,
+      name: 'SherlockQA',
+      head_sha: commitSha,
+      status: 'completed',
+      conclusion,
+      output: {
+        title: titleByVerdict[review.verdict] || 'Reviewed',
+        summary: summaryLines.join('\n'),
+        annotations
+      }
+    });
+    core.info(`Check Run created (conclusion=${conclusion})`);
+  } catch (e) {
+    // Most common cause: workflow lacks checks:write permission. Don't fail the action.
+    core.warning(`Check Run skipped: ${e.message}. Add "checks: write" to workflow permissions to enable.`);
+  }
+}
+
+function isScenarioPreviouslyChecked(scenario, previousCheckedScenarios) {
+  const normalize = (text) => text.toLowerCase().replace(/[^\w\s]/g, '').trim();
+  const normalizedScenario = normalize(scenario);
+  for (const checked of previousCheckedScenarios) {
+    const normalizedChecked = normalize(checked);
+    if (normalizedScenario === normalizedChecked) return true;
+    // Fuzzy carryover only for near-identical scenarios: ≥90% of the smaller
+    // word set shared AND at least 4 words in common. A one-word action change
+    // ("upload" → "delete") must NOT inherit the checkmark (#11), so the old
+    // bare-substring rule and 0.7 threshold are gone. False negatives are the
+    // safe direction — worst case QA re-tests a scenario.
+    const scenarioWords = new Set(normalizedScenario.split(/\s+/).filter(Boolean));
+    const checkedWords = new Set(normalizedChecked.split(/\s+/).filter(Boolean));
+    const intersection = [...scenarioWords].filter(w => checkedWords.has(w));
+    const minSize = Math.min(scenarioWords.size, checkedWords.size);
+    if (minSize > 0 && intersection.length >= 4 && intersection.length / minSize >= 0.9) return true;
+  }
+  return false;
+}
+
+module.exports = {
+  STICKY_MARKER,
+  REVIEW_MARKER,
+  COMMENT_MARKER,
+  isSherlockReview,
+  findPreviousState,
+  syncInlineComments,
+  formatSeverityBreakdown,
+  formatMinorNotesBlock,
+  buildReviewBody,
+  parseDiffForLinePositions,
+  upsertStickyComment,
+  createCheckRunSafely,
+  isScenarioPreviouslyChecked,
+};
+
+
+/***/ }),
+
+/***/ 1565:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+const core = __nccwpck_require__(7484);
+const { parseReviewResponse } = __nccwpck_require__(7727);
+const { splitDiffByFile, groupFileDiffs } = __nccwpck_require__(827);
+const { callOpenAI } = __nccwpck_require__(2695);
+const { callAzureOpenAI, callAzureResponsesAPI } = __nccwpck_require__(3291);
+const { callAnthropic } = __nccwpck_require__(9524);
+const { callBedrock } = __nccwpck_require__(7594);
+const { callGemini } = __nccwpck_require__(149);
+const { callOllama } = __nccwpck_require__(212);
+
+function defaultModelFor(provider) {
+  switch (provider) {
+    case 'anthropic': return 'claude-sonnet-4-5';
+    // Inference-profile form: newer Claude models on Bedrock reject the bare
+    // anthropic. ID with "on-demand throughput isn't supported" (verified live).
+    case 'bedrock': return 'us.anthropic.claude-sonnet-5';
+    case 'gemini': return 'gemini-2.0-flash';
+    case 'ollama': return 'llama3.1';
+    case 'azure':
+    case 'azure-responses': return 'gpt-4o-mini';
+    default: return 'gpt-4o-mini';
+  }
+}
+
+const MAX_DIFF_CHARS = 50000;
+const MAX_QA_SCENARIOS = 5;
+const VERDICT_RANK = { approved: 0, needs_changes: 1, do_not_merge: 2 };
+
+function mergeReviews(reviews) {
+  if (reviews.length === 1) return reviews[0];
+  const worst = reviews.reduce((w, r) => ((VERDICT_RANK[r.verdict] ?? 1) > (VERDICT_RANK[w.verdict] ?? 1) ? r : w));
+  const qaScenarios = [...new Set(reviews.flatMap(r => r.qa_scenarios || []))].slice(0, MAX_QA_SCENARIOS);
+  return {
+    summary: reviews.map(r => r.summary).filter(Boolean).join(' '),
+    line_comments: reviews.flatMap(r => r.line_comments || []),
+    tests_required: reviews.some(r => r.tests_required),
+    test_suggestion: reviews.map(r => r.test_suggestion).filter(Boolean).join(' '),
+    qa_scenarios: qaScenarios,
+    code_quality: reviews.map(r => r.code_quality).find(q => q && q !== 'null') || null,
+    questions: reviews.flatMap(r => r.questions || []),
+    verdict: worst.verdict,
+    verdict_reason: worst.verdict_reason
+  };
+}
+
+async function reviewDiff({ diff, files, config }) {
+  const groups = diff.length <= MAX_DIFF_CHARS
+    ? [[{ file: '', text: diff }]]
+    : groupFileDiffs(splitDiffByFile(diff), MAX_DIFF_CHARS);
+
+  const reviews = [];
+  const failedFiles = new Set();
+  const usage = { input: 0, output: 0 };
+  let responseTruncated = false;
+  let lastError;
+  for (const group of groups) {
+    const groupNames = group.map(f => f.file);
+    const groupNameSet = new Set(groupNames);
+    const groupFiles = groups.length > 1 ? files.filter(f => groupNameSet.has(f.filename)) : files;
+    try {
+      const result = await getAIReview({ ...config, diff: group.map(f => f.text).join(''), files: groupFiles });
+      reviews.push(result.review);
+      usage.input += result.usage?.input || 0;
+      usage.output += result.usage?.output || 0;
+      responseTruncated = responseTruncated || result.responseTruncated;
+    } catch (e) {
+      lastError = e;
+      core.warning(`Review of ${groupNames.join(', ')} failed: ${e.message}`);
+      groupNames.forEach(name => failedFiles.add(name));
+    }
+  }
+  if (reviews.length === 0) throw lastError;
+
+  let review = mergeReviews(reviews);
+  if (failedFiles.size > 0 && review.verdict === 'approved') review = { ...review, verdict: 'needs_changes' };
+  return { review, usage, truncated: false, responseTruncated, failedFiles: [...failedFiles] };
+}
+
 async function getAIReview(opts) {
   const { provider, model, diff, files, prAuthor, persona, domainKnowledge,
-    maxTokens, codeQuality, personality, strictness, mode, maxComments } = opts;
+    maxTokens, codeQuality, personality, strictness, mode, maxComments, repoRules } = opts;
 
   const changedFiles = files.map(f => f.filename).join('\n');
-  const systemPrompt = buildSystemPrompt(persona, domainKnowledge, codeQuality, personality, strictness, mode, maxComments);
+  const systemPrompt = buildSystemPrompt(persona, domainKnowledge, codeQuality, personality, strictness, mode, maxComments, repoRules);
   const userPrompt = buildUserPrompt(changedFiles, diff, prAuthor);
 
   const callers = {
@@ -40284,246 +41374,7 @@ async function withRetry(fn, label, attempts = 3) {
   throw lastErr;
 }
 
-async function callOpenAI(systemPrompt, userPrompt, model, maxTokens) {
-  const apiKey = core.getInput('openai-api-key', { required: true });
-  const client = new OpenAI({ apiKey });
-  const response = await client.chat.completions.create({
-    model,
-    messages: [
-      { role: 'system', content: systemPrompt },
-      { role: 'user', content: userPrompt }
-    ],
-    max_tokens: maxTokens,
-    temperature: 0.3,
-    response_format: { type: 'json_object' }
-  });
-  return {
-    content: response.choices[0].message.content,
-    truncated: response.choices[0].finish_reason === 'length',
-    usage: {
-      input: response.usage?.prompt_tokens || 0,
-      output: response.usage?.completion_tokens || 0
-    }
-  };
-}
-
-async function callAzureOpenAI(systemPrompt, userPrompt, model, maxTokens) {
-  const apiKey = core.getInput('azure-api-key', { required: true });
-  const endpoint = core.getInput('azure-endpoint', { required: true });
-  const deployment = core.getInput('azure-deployment') || model;
-  const apiVersion = core.getInput('azure-api-version') || '2024-02-15-preview';
-  const client = new OpenAI({
-    apiKey,
-    baseURL: `${endpoint}/openai/deployments/${deployment}`,
-    defaultQuery: { 'api-version': apiVersion },
-    defaultHeaders: { 'api-key': apiKey }
-  });
-  const response = await client.chat.completions.create({
-    model: deployment,
-    messages: [
-      { role: 'system', content: systemPrompt },
-      { role: 'user', content: userPrompt }
-    ],
-    max_tokens: maxTokens,
-    temperature: 0.3,
-    response_format: { type: 'json_object' }
-  });
-  return {
-    content: response.choices[0].message.content,
-    truncated: response.choices[0].finish_reason === 'length',
-    usage: {
-      input: response.usage?.prompt_tokens || 0,
-      output: response.usage?.completion_tokens || 0
-    }
-  };
-}
-
-async function callAzureResponsesAPI(systemPrompt, userPrompt, model, maxTokens) {
-  const apiKey = core.getInput('azure-api-key', { required: true });
-  const endpoint = core.getInput('azure-endpoint', { required: true });
-  const apiVersion = core.getInput('azure-api-version') || '2025-04-01-preview';
-  const fullPrompt = `${systemPrompt}\n\n---\n\n${userPrompt}`;
-  const url = `${endpoint}/openai/responses?api-version=${apiVersion}`;
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${apiKey}`
-    },
-    body: JSON.stringify({ input: fullPrompt, max_output_tokens: maxTokens, model })
-  });
-  if (!response.ok) {
-    const err = new Error(`Azure Responses API: ${response.status} - ${await response.text()}`);
-    err.status = response.status;
-    throw err;
-  }
-  const result = await response.json();
-  let content = '';
-  if (Array.isArray(result.output)) {
-    for (const item of result.output) {
-      if (item.type === 'message' && item.content) {
-        for (const c of item.content) {
-          if (c.type === 'output_text') content += c.text || '';
-        }
-      }
-    }
-  }
-  if (!content) throw new Error(`Unparseable Azure Responses output: ${JSON.stringify(result).slice(0, 500)}`);
-  return {
-    content,
-    truncated: result.status === 'incomplete',
-    usage: {
-      input: result.usage?.input_tokens || result.usage?.prompt_tokens || 0,
-      output: result.usage?.output_tokens || result.usage?.completion_tokens || 0
-    }
-  };
-}
-
-async function callAnthropic(systemPrompt, userPrompt, model, maxTokens) {
-  const apiKey = core.getInput('anthropic-api-key', { required: true });
-  const url = 'https://api.anthropic.com/v1/messages';
-  // Nudge JSON output by appending a leading "{" assistant turn (Anthropic trick).
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'x-api-key': apiKey,
-      'anthropic-version': '2023-06-01'
-    },
-    body: JSON.stringify({
-      model,
-      max_tokens: maxTokens,
-      temperature: 0.3,
-      system: systemPrompt,
-      messages: [
-        { role: 'user', content: userPrompt },
-        { role: 'assistant', content: '{' }
-      ]
-    })
-  });
-  if (!response.ok) {
-    const err = new Error(`Anthropic API: ${response.status} - ${await response.text()}`);
-    err.status = response.status;
-    throw err;
-  }
-  const result = await response.json();
-  const text = (result.content || []).filter(c => c.type === 'text').map(c => c.text).join('');
-  // We pre-filled "{", so prepend it back when parsing.
-  return {
-    content: '{' + text,
-    truncated: result.stop_reason === 'max_tokens',
-    usage: {
-      input: result.usage?.input_tokens || 0,
-      output: result.usage?.output_tokens || 0
-    }
-  };
-}
-
-async function callBedrock(systemPrompt, userPrompt, model, maxTokens) {
-  const apiKey = core.getInput('bedrock-api-key', { required: true });
-  const region = core.getInput('aws-region') || 'us-east-1';
-  // Converse API is model-agnostic (Claude, Llama, Mistral, Nova...). Bearer
-  // auth uses a Bedrock API key — SigV4/IAM-role auth is intentionally not
-  // supported to keep the zero-SDK fetch pattern.
-  const url = `https://bedrock-runtime.${region}.amazonaws.com/model/${encodeURIComponent(model)}/converse`;
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${apiKey}`
-    },
-    body: JSON.stringify({
-      system: [{ text: systemPrompt }],
-      messages: [{ role: 'user', content: [{ text: userPrompt }] }],
-      inferenceConfig: { maxTokens, temperature: 0.3 }
-    })
-  });
-  if (!response.ok) {
-    const err = new Error(`Bedrock API: ${response.status} - ${await response.text()}`);
-    err.status = response.status;
-    throw err;
-  }
-  const result = await response.json();
-  const blocks = result.output?.message?.content || [];
-  const text = blocks.filter(b => typeof b.text === 'string').map(b => b.text).join('');
-  return {
-    content: text,
-    truncated: result.stopReason === 'max_tokens',
-    usage: {
-      input: result.usage?.inputTokens || 0,
-      output: result.usage?.outputTokens || 0
-    }
-  };
-}
-
-async function callGemini(systemPrompt, userPrompt, model, maxTokens) {
-  const apiKey = core.getInput('gemini-api-key', { required: true });
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      systemInstruction: { parts: [{ text: systemPrompt }] },
-      contents: [{ role: 'user', parts: [{ text: userPrompt }] }],
-      generationConfig: {
-        temperature: 0.3,
-        maxOutputTokens: maxTokens,
-        responseMimeType: 'application/json'
-      }
-    })
-  });
-  if (!response.ok) {
-    const err = new Error(`Gemini API: ${response.status} - ${await response.text()}`);
-    err.status = response.status;
-    throw err;
-  }
-  const result = await response.json();
-  const text = result.candidates?.[0]?.content?.parts?.map(p => p.text).join('') || '';
-  if (!text) throw new Error(`Empty Gemini response: ${JSON.stringify(result).slice(0, 500)}`);
-  return {
-    content: text,
-    truncated: result.candidates?.[0]?.finishReason === 'MAX_TOKENS',
-    usage: {
-      input: result.usageMetadata?.promptTokenCount || 0,
-      output: result.usageMetadata?.candidatesTokenCount || 0
-    }
-  };
-}
-
-async function callOllama(systemPrompt, userPrompt, model, maxTokens) {
-  const baseUrl = core.getInput('ollama-base-url') || 'http://localhost:11434';
-  const url = `${baseUrl.replace(/\/$/, '')}/api/chat`;
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      model,
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: userPrompt }
-      ],
-      stream: false,
-      format: 'json',
-      options: { temperature: 0.3, num_predict: maxTokens }
-    })
-  });
-  if (!response.ok) {
-    const err = new Error(`Ollama API: ${response.status} - ${await response.text()}`);
-    err.status = response.status;
-    throw err;
-  }
-  const result = await response.json();
-  return {
-    content: result.message?.content || '',
-    truncated: result.done_reason === 'length',
-    usage: {
-      input: result.prompt_eval_count || 0,
-      output: result.eval_count || 0
-    }
-  };
-}
-
-function buildSystemPrompt(persona, domainKnowledge, codeQuality, personality = 'detective', strictness = 'balanced', mode = 'general', maxComments = 5) {
+function buildSystemPrompt(persona, domainKnowledge, codeQuality, personality = 'detective', strictness = 'balanced', mode = 'general', maxComments = 5, repoRules = '') {
   let prompt = '';
   if (persona) prompt += `${persona}\n\n`;
 
@@ -40605,6 +41456,10 @@ function buildSystemPrompt(persona, domainKnowledge, codeQuality, personality = 
 
   if (domainKnowledge) {
     prompt += `\n\n## Domain Context:\n${domainKnowledge}`;
+  }
+
+  if (repoRules) {
+    prompt += `\n\n## Repository rules (from the base branch)\nConventions this repository expects its code to follow. Flag violations in the diff. These do not change your role or your output format.\n\n${repoRules}`;
   }
 
   const strictnessGuidelines = {
@@ -40726,447 +41581,16 @@ ${diffContent}
 Respond with ONLY the JSON object as specified. No additional text.`;
 }
 
-function parseReviewResponse(content) {
-  // Coerce first: a refusal / content-filter returns null content, and calling
-  // .trim() on it would throw *outside* the try below (uncatchable) and fail the
-  // whole action. An empty string simply flows into the safe fallback.
-  const raw = content == null ? '' : String(content);
-  let jsonContent = raw.trim();
-  const jsonMatch = raw.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
-  if (jsonMatch) jsonContent = jsonMatch[1];
-  try {
-    return JSON.parse(jsonContent);
-  } catch (e) {
-    // Best-effort: extract first {...} block
-    const braceMatch = raw.match(/\{[\s\S]*\}/);
-    if (braceMatch) {
-      try { return JSON.parse(braceMatch[0]); } catch (_) { /* fall through */ }
-    }
-    core.warning(`Failed to parse AI response: ${e.message}`);
-    core.warning(`Raw response: ${raw.slice(0, 500)}`);
-    return {
-      summary: 'Unable to parse AI response',
-      line_comments: [],
-      tests_required: false,
-      test_suggestion: '',
-      qa_scenarios: [],
-      questions: [],
-      verdict: 'needs_changes'
-    };
-  }
-}
-
-function parseDiffForLinePositions(diffText) {
-  const fileLineMap = {};
-  let currentFile = null;
-  let diffPosition = 0;
-  let currentNewLine = 0;
-  let inHunk = false;
-
-  for (const line of diffText.split('\n')) {
-    // Every file section starts with "diff --git". Leaving the previous file
-    // here guarantees its header lines (index, --- a/, +++ b/) can never be
-    // recorded as the previous file's trailing positions (#7).
-    if (line.startsWith('diff --git ')) {
-      currentFile = null;
-      inHunk = false;
-      continue;
-    }
-
-    if (!currentFile) {
-      // Only "+++ b/<path>" opens an addressable file. "+++ /dev/null"
-      // (deleted file) has no new side, so its hunks stay unaddressable.
-      if (line.startsWith('+++ b/')) {
-        currentFile = line.slice(6);
-        fileLineMap[currentFile] = {};
-        diffPosition = 0; // GitHub positions count per file, from its first @@
-      }
-      continue;
-    }
-
-    const hunkMatch = line.match(/^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
-    if (hunkMatch) {
-      currentNewLine = parseInt(hunkMatch[1], 10);
-      diffPosition++;
-      inHunk = true;
-      continue;
-    }
-    if (!inHunk) continue;
-
-    // Inside a hunk, +/- prefixes always mean content — a real next-file
-    // "+++ b/" can't appear here because "diff --git" resets inHunk first.
-    if (line.startsWith('+')) {
-      fileLineMap[currentFile][currentNewLine] = diffPosition;
-      currentNewLine++;
-      diffPosition++;
-    } else if (line.startsWith('-')) {
-      diffPosition++;
-    } else if (line.startsWith('\\')) {
-      // "\ No newline at end of file" occupies a diff line — it counts toward
-      // position but maps to no new-side line.
-      diffPosition++;
-    } else {
-      fileLineMap[currentFile][currentNewLine] = diffPosition;
-      currentNewLine++;
-      diffPosition++;
-    }
-  }
-  return fileLineMap;
-}
-
-function countSeverity(comments) {
-  const counts = { error: 0, warning: 0, suggestion: 0 };
-  for (const c of comments) {
-    counts[normalizeSeverity(c.severity)]++;
-  }
-  return counts;
-}
-
-function formatSeverityBreakdown(counts, useEmoji) {
-  const parts = [];
-  const errIcon = useEmoji ? '🔴' : 'E';
-  const warnIcon = useEmoji ? '🟡' : 'W';
-  const suggIcon = useEmoji ? '🔵' : 'S';
-  if (counts.error) parts.push(`${counts.error} ${errIcon}`);
-  if (counts.warning) parts.push(`${counts.warning} ${warnIcon}`);
-  if (counts.suggestion) parts.push(`${counts.suggestion} ${suggIcon}`);
-  return parts.join(' · ');
-}
-
-// Renders the collapsed "Minor notes" block. Entries are usually suggestion-
-// severity nits ("no action required"), but overflow from the max-comments
-// cap can push error/warning findings in here too (I4) — those must not be
-// mislabeled as harmless, so the header drops the "no action required" claim
-// and each entry carries its real severity emoji.
-function formatMinorNotesBlock(minorNotes, e) {
-  const hasOverBudget = minorNotes.some(n => normalizeSeverity(n.severity) !== 'suggestion');
-  const headerSuffix = hasOverBudget
-    ? ` — includes ${minorNotes.filter(n => normalizeSeverity(n.severity) !== 'suggestion').length} over-budget findings`
-    : ' — low-severity, no action required';
-  const lines = ['<details>'];
-  lines.push(`<summary>${e.quality} <b>Minor notes (${minorNotes.length})</b>${headerSuffix}</summary>\n`);
-  minorNotes.forEach(n => {
-    const emoji = SEVERITY_EMOJI[normalizeSeverity(n.severity)] || '🔵';
-    lines.push(`- ${emoji} \`${n.file}:${n.line}\` — ${n.comment}`);
-  });
-  lines.push('\n</details>\n');
-  return lines;
-}
-
-function buildReviewBody(review, prAuthor, previousCheckedScenarios = new Set(), reviewStyle = 'compact', useEmoji = true, truncated = false, severityCounts = null, responseTruncated = false, minorNotes = []) {
-  const e = useEmoji ? {
-    detective: '🔍', summary: '📝', tests: '🧪', qa: '🎯', questions: '❓',
-    quality: '🧹', verdict: '🏁', approved: '✅', needs_changes: '⚠️',
-    do_not_merge: '❌', warning: '⚠️'
-  } : {
-    detective: '[SHERLOCK]', summary: '[SUMMARY]', tests: '[TESTS]', qa: '[QA]',
-    questions: '[?]', quality: '[QUALITY]', verdict: '[VERDICT]', approved: '[OK]',
-    needs_changes: '[CHANGES]', do_not_merge: '[STOP]', warning: '[!]'
-  };
-
-  const verdictEmoji = { approved: e.approved, needs_changes: e.needs_changes, do_not_merge: e.do_not_merge };
-  const verdictText = { approved: 'Approved', needs_changes: 'Needs Changes', do_not_merge: 'Do Not Merge' };
-
-  const issueCount = review.line_comments?.length || 0;
-  const qaCount = review.qa_scenarios?.length || 0;
-  const questionCount = review.questions?.length || 0;
-  const severityStr = severityCounts && issueCount > 0
-    ? ` (${formatSeverityBreakdown(severityCounts, useEmoji)})`
-    : '';
-  const minorNotesStr = minorNotes.length > 0 ? ` · +${minorNotes.length} minor note${minorNotes.length === 1 ? '' : 's'}` : '';
-
-  const parts = [];
-
-  if (reviewStyle === 'compact') {
-    const isApproved = review.verdict === 'approved';
-    const isCleanApproval = isApproved && issueCount === 0 && questionCount === 0 && minorNotes.length === 0;
-    // QA is suppressed on approvals below (M7) — don't advertise a count for a
-    // section that never renders in this style.
-    const qaStr = isApproved ? '' : ` · ${qaCount} QA scenarios`;
-    parts.push(`## ${e.detective} SherlockQA's Review\n`);
-    parts.push(`**Verdict:** ${verdictEmoji[review.verdict] || e.needs_changes} ${verdictText[review.verdict] || review.verdict} | ${issueCount} issues${severityStr}${minorNotesStr}${qaStr}${questionCount > 0 ? ` · ${questionCount} questions` : ''}\n`);
-    if (review.verdict_reason) parts.push(`> ${review.verdict_reason}\n`);
-
-    if (truncated) {
-      parts.push(`> ${e.warning} **Heads up:** PR diff was large and got truncated — this review may have missed parts of the change. Consider splitting large PRs.\n`);
-    }
-
-    if (responseTruncated) {
-      parts.push(`> ${e.warning} **Heads up:** the AI response hit the \`max-tokens\` limit and was cut off — findings may be missing and the verdict may be unreliable. Raise \`max-tokens\` in your workflow.\n`);
-    }
-
-    if (!isCleanApproval) {
-      parts.push(`**Summary:** ${review.summary || 'No summary'}\n`);
-
-      if (review.code_quality && review.code_quality !== 'null') {
-        const qualityText = typeof review.code_quality === 'string'
-          ? review.code_quality
-          : review.code_quality.summary || '';
-        if (qualityText && qualityText !== 'null') {
-          parts.push(`**Code Quality:** ${qualityText}\n`);
-        }
-      }
-
-      if (review.tests_required && review.test_suggestion) {
-        parts.push('<details>');
-        parts.push(`<summary>${e.tests} <b>Tests Suggested</b></summary>\n`);
-        parts.push(`${review.test_suggestion}\n`);
-        parts.push('</details>\n');
-      }
-
-      if (!isApproved && review.qa_scenarios?.length > 0) {
-        parts.push('<details>');
-        parts.push(`<summary>${e.qa} <b>QA Scenarios (${qaCount})</b></summary>\n`);
-        review.qa_scenarios.forEach(scenario => {
-          const isChecked = isScenarioPreviouslyChecked(scenario, previousCheckedScenarios);
-          const checkbox = isChecked ? '[x]' : '[ ]';
-          parts.push(`- ${checkbox} ${scenario}`);
-        });
-        parts.push('\n</details>\n');
-      }
-
-      if (!isApproved && review.questions?.length > 0) {
-        parts.push(`**${e.questions} Questions:** ${review.questions.join(' | ')}\n`);
-      }
-    }
-
-    if (minorNotes.length > 0) {
-      parts.push(...formatMinorNotesBlock(minorNotes, e));
-    }
-  } else {
-    parts.push(`## ${e.detective} SherlockQA's Review\n`);
-    parts.push(`### ${e.summary} Summary\n${review.summary || 'No summary'}\n`);
-
-    if (truncated) {
-      parts.push(`> ${e.warning} **Heads up:** PR diff was large and got truncated — this review may have missed parts of the change.\n`);
-    }
-
-    if (responseTruncated) {
-      parts.push(`> ${e.warning} **Heads up:** the AI response hit the \`max-tokens\` limit and was cut off — findings may be missing and the verdict may be unreliable. Raise \`max-tokens\` in your workflow.\n`);
-    }
-
-    if (review.tests_required && review.test_suggestion) {
-      parts.push(`### ${e.tests} Tests Required`);
-      parts.push(`${e.warning} **@${prAuthor}** - Please add test cases for this change:\n`);
-      parts.push(`${review.test_suggestion}\n`);
-    }
-
-    if (review.qa_scenarios?.length > 0) {
-      parts.push(`### ${e.qa} QA Test Scenarios`);
-      review.qa_scenarios.forEach(scenario => {
-        const isChecked = isScenarioPreviouslyChecked(scenario, previousCheckedScenarios);
-        const checkbox = isChecked ? '[x]' : '[ ]';
-        parts.push(`- ${checkbox} ${scenario}`);
-      });
-      parts.push('');
-    }
-
-    if (review.questions?.length > 0) {
-      parts.push(`### ${e.questions} Questions`);
-      review.questions.forEach(q => parts.push(`- ${q}`));
-      parts.push('');
-    }
-
-    if (review.code_quality && review.code_quality !== 'null') {
-      const qualityText = typeof review.code_quality === 'string'
-        ? review.code_quality
-        : review.code_quality.summary || '';
-      if (qualityText && qualityText !== 'null') {
-        parts.push(`### ${e.quality} Code Quality`);
-        parts.push(`${qualityText}\n`);
-      }
-      if (typeof review.code_quality === 'object' && review.code_quality.issues?.length > 0) {
-        review.code_quality.issues.forEach(issue => parts.push(`- ${issue}`));
-        parts.push('');
-      }
-    }
-
-    parts.push(`### ${e.verdict} Verdict\n${verdictEmoji[review.verdict] || e.needs_changes} ${verdictText[review.verdict] || review.verdict}${minorNotesStr}`);
-    if (review.verdict_reason) parts.push(`\n> ${review.verdict_reason}`);
-
-    if (minorNotes.length > 0) {
-      parts.push(...formatMinorNotesBlock(minorNotes, e));
-    }
-  }
-
-  return parts.join('\n');
-}
-
-// Glob matcher supporting *, **, ?, and exact substring fallback for legacy patterns.
-function matchPattern(filename, pattern) {
-  if (!pattern) return false;
-  // Exact match
-  if (filename === pattern) return true;
-  // Convert glob to regex
-  if (pattern.includes('*') || pattern.includes('?')) {
-    const regex = globToRegex(pattern);
-    if (regex.test(filename)) return true;
-    // Common case: "*.md" should also match "docs/foo.md"
-    if (pattern.startsWith('*.') && filename.endsWith(pattern.slice(1))) return true;
-    return false;
-  }
-  // Substring fallback (legacy behavior so existing configs keep working)
-  return filename.includes(pattern);
-}
-
-function globToRegex(glob) {
-  let re = '';
-  for (let i = 0; i < glob.length; i++) {
-    const c = glob[i];
-    if (c === '*') {
-      if (glob[i + 1] === '*') {
-        re += '.*'; i++;
-        if (glob[i + 1] === '/') i++;
-      } else {
-        re += '[^/]*';
-      }
-    } else if (c === '?') {
-      re += '[^/]';
-    } else if ('.+^${}()|[]\\'.includes(c)) {
-      re += '\\' + c;
-    } else {
-      re += c;
-    }
-  }
-  return new RegExp('^' + re + '$');
-}
-
-async function upsertStickyComment(octokit, owner, repo, prNumber, body) {
-  const stickyBody = `${STICKY_MARKER}\n${body}`;
-  try {
-    const comments = await octokit.paginate(octokit.rest.issues.listComments, {
-      owner, repo, issue_number: prNumber, per_page: 100
-    });
-    const existing = comments.find(c => c.body && c.body.includes(STICKY_MARKER));
-    if (existing) {
-      await octokit.rest.issues.updateComment({
-        owner, repo, comment_id: existing.id, body: stickyBody
-      });
-      core.info(`Updated sticky comment #${existing.id}`);
-    } else {
-      await octokit.rest.issues.createComment({
-        owner, repo, issue_number: prNumber, body: stickyBody
-      });
-      core.info('Created sticky comment');
-    }
-  } catch (e) {
-    core.warning(`Failed to upsert sticky comment: ${e.message}`);
-  }
-}
-
-async function createCheckRunSafely(opts) {
-  const { octokit, owner, repo, commitSha, review, severityCounts,
-    usage, cost, model, aiProvider, truncated, responseTruncated } = opts;
-
-  const conclusion =
-    review.verdict === 'do_not_merge' ? 'failure' :
-    review.verdict === 'needs_changes' ? 'neutral' :
-    review.verdict === 'approved' ? 'success' : 'neutral';
-
-  const titleByVerdict = {
-    approved: 'Approved — no blocking issues',
-    needs_changes: 'Needs changes',
-    do_not_merge: 'Do not merge'
-  };
-
-  const issueCount = (review.line_comments || []).length;
-  const summaryLines = [
-    `**Verdict:** ${review.verdict}`,
-    `**Issues:** ${issueCount} (${severityCounts.error}🔴 · ${severityCounts.warning}🟡 · ${severityCounts.suggestion}🔵)`,
-    `**Model:** ${aiProvider} / ${model}`,
-    `**Tokens:** ${usage.input} in / ${usage.output} out${cost != null ? ` · ~$${cost.toFixed(4)}` : ''}`
-  ];
-  if (truncated) summaryLines.push('> ⚠️ PR diff truncated — review may be incomplete.');
-  if (responseTruncated) summaryLines.push('> ⚠️ AI response hit max-tokens — review may be incomplete.');
-  if (review.summary) summaryLines.push('', review.summary);
-  if (review.verdict_reason) summaryLines.push('', `> ${review.verdict_reason}`);
-
-  // Map review comments back to annotations (file + line). The review API uses
-  // diff "position" for inline comments, but the Checks API needs file path + line.
-  const annotations = [];
-  for (const c of (review.line_comments || [])) {
-    if (!c.file || !c.line) continue;
-    const level = c.severity === 'error' ? 'failure'
-      : c.severity === 'warning' ? 'warning' : 'notice';
-    annotations.push({
-      path: c.file,
-      start_line: c.line,
-      end_line: c.line,
-      annotation_level: level,
-      message: c.comment || ''
-    });
-    if (annotations.length >= 50) break; // Checks API limit per request
-  }
-
-  try {
-    await octokit.rest.checks.create({
-      owner, repo,
-      name: 'SherlockQA',
-      head_sha: commitSha,
-      status: 'completed',
-      conclusion,
-      output: {
-        title: titleByVerdict[review.verdict] || 'Reviewed',
-        summary: summaryLines.join('\n'),
-        annotations
-      }
-    });
-    core.info(`Check Run created (conclusion=${conclusion})`);
-  } catch (e) {
-    // Most common cause: workflow lacks checks:write permission. Don't fail the action.
-    core.warning(`Check Run skipped: ${e.message}. Add "checks: write" to workflow permissions to enable.`);
-  }
-}
-
-function isScenarioPreviouslyChecked(scenario, previousCheckedScenarios) {
-  const normalize = (text) => text.toLowerCase().replace(/[^\w\s]/g, '').trim();
-  const normalizedScenario = normalize(scenario);
-  for (const checked of previousCheckedScenarios) {
-    const normalizedChecked = normalize(checked);
-    if (normalizedScenario === normalizedChecked) return true;
-    // Fuzzy carryover only for near-identical scenarios: ≥90% of the smaller
-    // word set shared AND at least 4 words in common. A one-word action change
-    // ("upload" → "delete") must NOT inherit the checkmark (#11), so the old
-    // bare-substring rule and 0.7 threshold are gone. False negatives are the
-    // safe direction — worst case QA re-tests a scenario.
-    const scenarioWords = new Set(normalizedScenario.split(/\s+/).filter(Boolean));
-    const checkedWords = new Set(normalizedChecked.split(/\s+/).filter(Boolean));
-    const intersection = [...scenarioWords].filter(w => checkedWords.has(w));
-    const minSize = Math.min(scenarioWords.size, checkedWords.size);
-    if (minSize > 0 && intersection.length >= 4 && intersection.length / minSize >= 0.9) return true;
-  }
-  return false;
-}
-
-// Execute only when run directly (node dist/index.js). When required by the test
-// suite the pure helpers are exposed instead, so importing never runs the action.
-if (__nccwpck_require__.c[__nccwpck_require__.s] === module) {
-  run();
-}
-
 module.exports = {
-  makeInputResolver,
-  normalizeSeverity,
-  normalizeConfidence,
-  filterAndRouteComments,
-  resolveReviewEvent,
-  planFormalReview,
-  planReviewFallback,
-  parseReviewResponse,
-  parseDiffForLinePositions,
-  countSeverity,
+  defaultModelFor,
+  reviewDiff,
+  mergeReviews,
+  getAIReview,
+  PRICING,
   estimateCost,
-  matchPattern,
-  globToRegex,
-  isScenarioPreviouslyChecked,
-  isSherlockReview,
+  withRetry,
   buildSystemPrompt,
   buildUserPrompt,
-  buildReviewBody,
-  callAnthropic,
-  callOllama,
-  callBedrock,
-  defaultModelFor,
 };
 
 
@@ -43110,7 +43534,7 @@ var _FormDataEncoder_instances, _FormDataEncoder_CRLF, _FormDataEncoder_CRLF_BYT
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.Encoder = exports.FormDataEncoder = void 0;
 const createBoundary_1 = __importDefault(__nccwpck_require__(2121));
-const isPlainObject_1 = __importDefault(__nccwpck_require__(4652));
+const isPlainObject_1 = __importDefault(__nccwpck_require__(9890));
 const normalizeValue_1 = __importDefault(__nccwpck_require__(3443));
 const escapeName_1 = __importDefault(__nccwpck_require__(3715));
 const isFileLike_1 = __nccwpck_require__(9266);
@@ -43351,7 +43775,7 @@ exports["default"] = isFunction;
 
 /***/ }),
 
-/***/ 4652:
+/***/ 9890:
 /***/ ((__unused_webpack_module, exports) => {
 
 "use strict";
@@ -44079,7 +44503,7 @@ Object.defineProperty(exports, "__esModule", ({ value: true }));
 /**
  * Disclaimer: modules in _shims aren't intended to be imported by SDK users.
  */
-__exportStar(__nccwpck_require__(7584), exports);
+__exportStar(__nccwpck_require__(5203), exports);
 //# sourceMappingURL=runtime-node.js.map
 
 /***/ }),
@@ -44108,7 +44532,7 @@ exports.init();
 
 /***/ }),
 
-/***/ 7584:
+/***/ 5203:
 /***/ (function(__unused_webpack_module, exports, __nccwpck_require__) {
 
 "use strict";
@@ -53190,8 +53614,8 @@ module.exports = /*#__PURE__*/JSON.parse('[[[0,44],"disallowed_STD3_valid"],[[45
 /******/ 		}
 /******/ 		// Create a new module (and put it into the cache)
 /******/ 		var module = __webpack_module_cache__[moduleId] = {
-/******/ 			id: moduleId,
-/******/ 			loaded: false,
+/******/ 			// no module.id needed
+/******/ 			// no module.loaded needed
 /******/ 			exports: {}
 /******/ 		};
 /******/ 	
@@ -53204,36 +53628,21 @@ module.exports = /*#__PURE__*/JSON.parse('[[[0,44],"disallowed_STD3_valid"],[[45
 /******/ 			if(threw) delete __webpack_module_cache__[moduleId];
 /******/ 		}
 /******/ 	
-/******/ 		// Flag the module as loaded
-/******/ 		module.loaded = true;
-/******/ 	
 /******/ 		// Return the exports of the module
 /******/ 		return module.exports;
 /******/ 	}
 /******/ 	
-/******/ 	// expose the module cache
-/******/ 	__nccwpck_require__.c = __webpack_module_cache__;
-/******/ 	
 /************************************************************************/
-/******/ 	/* webpack/runtime/node module decorator */
-/******/ 	(() => {
-/******/ 		__nccwpck_require__.nmd = (module) => {
-/******/ 			module.paths = [];
-/******/ 			if (!module.children) module.children = [];
-/******/ 			return module;
-/******/ 		};
-/******/ 	})();
-/******/ 	
 /******/ 	/* webpack/runtime/compat */
 /******/ 	
 /******/ 	if (typeof __nccwpck_require__ !== 'undefined') __nccwpck_require__.ab = __dirname + "/";
 /******/ 	
 /************************************************************************/
 /******/ 	
-/******/ 	// module cache are used so entry inlining is disabled
 /******/ 	// startup
 /******/ 	// Load entry module and return exports
-/******/ 	var __webpack_exports__ = __nccwpck_require__(__nccwpck_require__.s = 5105);
+/******/ 	// This entry module is referenced by other modules so it can't be inlined
+/******/ 	var __webpack_exports__ = __nccwpck_require__(5105);
 /******/ 	module.exports = __webpack_exports__;
 /******/ 	
 /******/ })()

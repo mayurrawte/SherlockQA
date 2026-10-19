@@ -1,0 +1,89 @@
+const { execFileSync } = require('child_process');
+
+const RULE_PATHS = ['CLAUDE.md', 'AGENTS.md', 'PATTERNS.md', '.cursorrules', '.github/copilot-instructions.md'];
+const RULES_DIR = '.sherlockqa/rules/';
+
+function git(repoPath, args) {
+  return execFileSync('git', ['-C', repoPath, ...args], {
+    encoding: 'utf8', stdio: 'pipe', maxBuffer: 10 * 1024 * 1024,
+    timeout: 30000, env: { ...process.env, GIT_TERMINAL_PROMPT: '0' }
+  });
+}
+
+function hasCheckout(repoPath) {
+  try {
+    git(repoPath, ['rev-parse', '--git-dir']);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// Config and rules both need the base commit; a failed fetch can take the full timeout, so try it once per run.
+const baseCommitAvailable = new Map();
+
+function ensureBaseCommit(repoPath, baseSha) {
+  const key = `${repoPath}\0${baseSha}`;
+  if (baseCommitAvailable.has(key)) return baseCommitAvailable.get(key);
+  let available = true;
+  try {
+    git(repoPath, ['cat-file', '-e', `${baseSha}^{commit}`]);
+  } catch {
+    try {
+      git(repoPath, ['fetch', '--depth=1', 'origin', baseSha]);
+      git(repoPath, ['cat-file', '-e', `${baseSha}^{commit}`]);
+    } catch {
+      available = false;
+    }
+  }
+  baseCommitAvailable.set(key, available);
+  return available;
+}
+
+function formatRules(rules) {
+  return rules.map(r => `### ${r.path}\n${r.text}`).join('\n\n');
+}
+
+// Reads from the base commit only, so a PR cannot rewrite the rules it is reviewed against.
+function loadRuleFiles({ repoPath, baseSha, budgetChars = 20000 }) {
+  if (!hasCheckout(repoPath)) {
+    return { rules: [], warning: 'No checkout found; add actions/checkout before SherlockQA to apply repository rules.' };
+  }
+
+  if (!ensureBaseCommit(repoPath, baseSha)) {
+    return { rules: [], warning: 'Repository rules skipped: the base commit is unavailable.' };
+  }
+
+  let ruleDirFiles = [];
+  try {
+    ruleDirFiles = git(repoPath, ['ls-tree', '--name-only', baseSha, RULES_DIR])
+      .split('\n').filter(p => p.endsWith('.md')).sort();
+  } catch {
+    ruleDirFiles = [];
+  }
+
+  const rules = [];
+  const skipped = [];
+  let total = 0;
+  for (const filePath of [...RULE_PATHS, ...ruleDirFiles]) {
+    let text;
+    try {
+      text = git(repoPath, ['show', `${baseSha}:${filePath}`]);
+    } catch {
+      continue;
+    }
+    if (total + text.length > budgetChars) {
+      skipped.push(filePath);
+      continue;
+    }
+    total += text.length;
+    rules.push({ path: filePath, text });
+  }
+
+  const warning = skipped.length > 0
+    ? `Repository rules skipped because they exceed the ${budgetChars} character budget: ${skipped.join(', ')}`
+    : null;
+  return { rules, warning };
+}
+
+module.exports = { git, hasCheckout, ensureBaseCommit, formatRules, loadRuleFiles };
