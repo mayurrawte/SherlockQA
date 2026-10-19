@@ -39833,11 +39833,47 @@ function globToRegex(glob) {
   return new RegExp('^' + re + '$');
 }
 
+function filterDiff(diffText, ignorePatterns) {
+  const lines = diffText.split(/(?<=\n)/);
+  const kept = [];
+  let block = [];
+  const flush = () => {
+    if (block.length === 0) return;
+    let filePath = null;
+    let oldPath = null;
+    let renameTo = null;
+    for (const rawLine of block.slice(1)) {
+      const line = rawLine.trimEnd();
+      if (line.startsWith('@@')) break;
+      if (line.startsWith('rename to ')) renameTo = line.slice('rename to '.length);
+      else if (line.startsWith('--- a/')) oldPath = line.slice('--- a/'.length);
+      else if (line.startsWith('+++ b/')) filePath = line.slice('+++ b/'.length);
+      else if (line === '+++ /dev/null') filePath = oldPath;
+    }
+    if (!filePath) filePath = renameTo;
+    if (!filePath) {
+      const header = block[0].trimEnd().match(/^diff --git a\/.* b\/(.*)$/);
+      filePath = header ? header[1] : null;
+    }
+    if (!filePath || !ignorePatterns.some(pattern => matchPattern(filePath, pattern))) {
+      kept.push(...block);
+    }
+    block = [];
+  };
+  for (const line of lines) {
+    if (line.startsWith('diff --git ')) flush();
+    block.push(line);
+  }
+  flush();
+  return kept.join('');
+}
+
 module.exports = {
   makeInputResolver,
   loadRepoConfig,
   matchPattern,
   globToRegex,
+  filterDiff,
 };
 
 
@@ -39955,7 +39991,7 @@ module.exports = {
 const core = __nccwpck_require__(7484);
 const github = __nccwpck_require__(3228);
 const { SEVERITY_EMOJI, normalizeSeverity, normalizeConfidence, filterAndRouteComments, parseReviewResponse, countSeverity } = __nccwpck_require__(7727);
-const { makeInputResolver, loadRepoConfig, matchPattern, globToRegex } = __nccwpck_require__(827);
+const { makeInputResolver, loadRepoConfig, matchPattern, globToRegex, filterDiff } = __nccwpck_require__(827);
 const { defaultModelFor, reviewDiff, estimateCost, buildSystemPrompt, buildUserPrompt } = __nccwpck_require__(1565);
 const { REVIEW_MARKER, isSherlockReview, findPreviousState, syncInlineComments, buildReviewBody, parseDiffForLinePositions, upsertStickyComment, createCheckRunSafely, isScenarioPreviouslyChecked } = __nccwpck_require__(2090);
 const { callAnthropic } = __nccwpck_require__(9524);
@@ -40031,10 +40067,16 @@ async function run() {
       return;
     }
 
+    const filteredDiff = filterDiff(diff, ignorePatterns);
+    if (!filteredDiff) {
+      core.info('No files to review after filtering');
+      return;
+    }
+
     core.info(`Reviewing ${filesToReview.length} files`);
 
     const { review, usage, truncated, responseTruncated } = await reviewDiff({
-      diff, files: filesToReview,
+      diff: filteredDiff, files: filesToReview,
       config: {
         provider: aiProvider, model, prAuthor, persona, domainKnowledge, maxTokens,
         codeQuality, personality, strictness: reviewStrictness, mode, maxComments

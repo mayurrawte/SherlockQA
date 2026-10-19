@@ -1,7 +1,7 @@
 const core = require('@actions/core');
 const github = require('@actions/github');
 const { SEVERITY_EMOJI, normalizeSeverity, normalizeConfidence, filterAndRouteComments, parseReviewResponse, countSeverity } = require('./findings');
-const { makeInputResolver, loadRepoConfig, matchPattern, globToRegex } = require('./collect');
+const { makeInputResolver, loadRepoConfig, matchPattern, globToRegex, filterDiff } = require('./collect');
 const { defaultModelFor, reviewDiff, estimateCost, buildSystemPrompt, buildUserPrompt } = require('./review');
 const { REVIEW_MARKER, isSherlockReview, findPreviousState, syncInlineComments, buildReviewBody, parseDiffForLinePositions, upsertStickyComment, createCheckRunSafely, isScenarioPreviouslyChecked } = require('./publish');
 const { callAnthropic } = require('./providers/anthropic');
@@ -77,10 +77,16 @@ async function run() {
       return;
     }
 
+    const filteredDiff = filterDiff(diff, ignorePatterns);
+    if (!filteredDiff) {
+      core.info('No files to review after filtering');
+      return;
+    }
+
     core.info(`Reviewing ${filesToReview.length} files`);
 
     const { review, usage, truncated, responseTruncated } = await reviewDiff({
-      diff, files: filesToReview,
+      diff: filteredDiff, files: filesToReview,
       config: {
         provider: aiProvider, model, prAuthor, persona, domainKnowledge, maxTokens,
         codeQuality, personality, strictness: reviewStrictness, mode, maxComments

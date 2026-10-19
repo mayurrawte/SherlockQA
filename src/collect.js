@@ -76,9 +76,45 @@ function globToRegex(glob) {
   return new RegExp('^' + re + '$');
 }
 
+function filterDiff(diffText, ignorePatterns) {
+  const lines = diffText.split(/(?<=\n)/);
+  const kept = [];
+  let block = [];
+  const flush = () => {
+    if (block.length === 0) return;
+    let filePath = null;
+    let oldPath = null;
+    let renameTo = null;
+    for (const rawLine of block.slice(1)) {
+      const line = rawLine.trimEnd();
+      if (line.startsWith('@@')) break;
+      if (line.startsWith('rename to ')) renameTo = line.slice('rename to '.length);
+      else if (line.startsWith('--- a/')) oldPath = line.slice('--- a/'.length);
+      else if (line.startsWith('+++ b/')) filePath = line.slice('+++ b/'.length);
+      else if (line === '+++ /dev/null') filePath = oldPath;
+    }
+    if (!filePath) filePath = renameTo;
+    if (!filePath) {
+      const header = block[0].trimEnd().match(/^diff --git a\/.* b\/(.*)$/);
+      filePath = header ? header[1] : null;
+    }
+    if (!filePath || !ignorePatterns.some(pattern => matchPattern(filePath, pattern))) {
+      kept.push(...block);
+    }
+    block = [];
+  };
+  for (const line of lines) {
+    if (line.startsWith('diff --git ')) flush();
+    block.push(line);
+  }
+  flush();
+  return kept.join('');
+}
+
 module.exports = {
   makeInputResolver,
   loadRepoConfig,
   matchPattern,
   globToRegex,
+  filterDiff,
 };
