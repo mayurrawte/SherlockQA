@@ -142,6 +142,20 @@ describe('reviewDiff in groups', () => {
     expect(r.review.verdict).toBe('needs_changes');
   });
 
+  test('a failed group downgrades an approved merge to needs_changes', async () => {
+    global.fetch = jest.fn().mockImplementation(async (url, opts) => {
+      if (opts.body.includes('lib/c.js')) {
+        const e = new Error('bad request');
+        e.status = 400;
+        throw e;
+      }
+      return okResponse({ summary: 'ok', verdict: 'approved', line_comments: [] });
+    });
+    const r = await reviewDiff({ diff: THREE_FILES, files, config });
+    expect(r.failedFiles).toEqual(['lib/c.js']);
+    expect(r.review.verdict).toBe('needs_changes');
+  });
+
   test('rethrows when every group fails', async () => {
     global.fetch = jest.fn().mockImplementation(async () => {
       const e = new Error('bad request');

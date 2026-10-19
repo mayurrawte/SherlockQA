@@ -41169,7 +41169,10 @@ async function reviewDiff({ diff, files, config }) {
   }
   if (reviews.length === 0) throw lastError;
 
-  return { review: mergeReviews(reviews), usage, truncated: false, responseTruncated, failedFiles };
+  let review = mergeReviews(reviews);
+  // Unreviewed files must never be auto-approved.
+  if (failedFiles.length > 0 && review.verdict === 'approved') review = { ...review, verdict: 'needs_changes' };
+  return { review, usage, truncated: false, responseTruncated, failedFiles };
 }
 
 async function getAIReview(opts) {
