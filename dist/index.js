@@ -39868,12 +39868,67 @@ function filterDiff(diffText, ignorePatterns) {
   return kept.join('');
 }
 
+function splitDiffByFile(diffText) {
+  const fileDiffs = [];
+  for (const line of diffText.split(/(?<=\n)/)) {
+    if (line.startsWith('diff --git ')) {
+      const header = line.trimEnd().match(/^diff --git a\/.* b\/(.*)$/);
+      fileDiffs.push({ file: header ? header[1] : line.trimEnd(), text: '' });
+    }
+    if (fileDiffs.length === 0) continue;
+    fileDiffs[fileDiffs.length - 1].text += line;
+  }
+  return fileDiffs;
+}
+
+function groupFileDiffs(fileDiffs, budgetChars) {
+  const dirOf = (file) => file.slice(0, file.lastIndexOf('/') + 1);
+  const sorted = [...fileDiffs].sort((a, b) =>
+    dirOf(a.file).localeCompare(dirOf(b.file)) || b.text.length - a.text.length || a.file.localeCompare(b.file));
+
+  const groups = [];
+  let current = [];
+  let currentSize = 0;
+  for (const fileDiff of sorted) {
+    if (fileDiff.text.length > budgetChars) {
+      if (current.length > 0) groups.push(current);
+      current = [];
+      currentSize = 0;
+      // Split only at @@ hunk boundaries; a single hunk over budget stays whole.
+      const firstHunk = fileDiff.text.indexOf('\n@@') + 1;
+      const header = fileDiff.text.slice(0, firstHunk);
+      const hunks = fileDiff.text.slice(firstHunk).split(/(?=^@@ )/m);
+      let piece = header;
+      for (const hunk of hunks) {
+        if (piece !== header && piece.length + hunk.length > budgetChars) {
+          groups.push([{ file: fileDiff.file, text: piece }]);
+          piece = header;
+        }
+        piece += hunk;
+      }
+      groups.push([{ file: fileDiff.file, text: piece }]);
+      continue;
+    }
+    if (currentSize + fileDiff.text.length > budgetChars) {
+      groups.push(current);
+      current = [];
+      currentSize = 0;
+    }
+    current.push(fileDiff);
+    currentSize += fileDiff.text.length;
+  }
+  if (current.length > 0) groups.push(current);
+  return groups;
+}
+
 module.exports = {
   makeInputResolver,
   loadRepoConfig,
   matchPattern,
   globToRegex,
   filterDiff,
+  splitDiffByFile,
+  groupFileDiffs,
 };
 
 
@@ -40075,7 +40130,7 @@ async function run() {
 
     core.info(`Reviewing ${filesToReview.length} files`);
 
-    const { review, usage, truncated, responseTruncated } = await reviewDiff({
+    const { review, usage, truncated, responseTruncated, failedFiles } = await reviewDiff({
       diff: filteredDiff, files: filesToReview,
       config: {
         provider: aiProvider, model, prAuthor, persona, domainKnowledge, maxTokens,
@@ -40114,7 +40169,7 @@ async function run() {
     }
 
     const severityCounts = countSeverity(routed.inline);
-    const body = buildReviewBody(review, prAuthor, previousCheckedScenarios, reviewStyle, useEmoji, truncated, severityCounts, responseTruncated, routed.minorNotes);
+    const body = buildReviewBody(review, prAuthor, previousCheckedScenarios, reviewStyle, useEmoji, truncated, severityCounts, responseTruncated, routed.minorNotes, failedFiles);
 
     if (autoApprove && review.verdict === 'approved' && context.eventName !== 'pull_request') {
       core.warning('auto-approve is disabled outside same-repo pull_request events (e.g. pull_request_target): the fork diff is untrusted and could steer the verdict via prompt injection. Posting a COMMENT instead.');
@@ -40711,7 +40766,7 @@ function formatMinorNotesBlock(minorNotes, e) {
   return lines;
 }
 
-function buildReviewBody(review, prAuthor, previousCheckedScenarios = new Set(), reviewStyle = 'compact', useEmoji = true, truncated = false, severityCounts = null, responseTruncated = false, minorNotes = []) {
+function buildReviewBody(review, prAuthor, previousCheckedScenarios = new Set(), reviewStyle = 'compact', useEmoji = true, truncated = false, severityCounts = null, responseTruncated = false, minorNotes = [], failedFiles = []) {
   const e = useEmoji ? {
     detective: '🔍', summary: '📝', tests: '🧪', qa: '🎯', questions: '❓',
     quality: '🧹', verdict: '🏁', approved: '✅', needs_changes: '⚠️',
@@ -40745,7 +40800,9 @@ function buildReviewBody(review, prAuthor, previousCheckedScenarios = new Set(),
     parts.push(`**Verdict:** ${verdictEmoji[review.verdict] || e.needs_changes} ${verdictText[review.verdict] || review.verdict} | ${issueCount} issues${severityStr}${minorNotesStr}${qaStr}${questionCount > 0 ? ` · ${questionCount} questions` : ''}\n`);
     if (review.verdict_reason) parts.push(`> ${review.verdict_reason}\n`);
 
-    if (truncated) {
+    if (failedFiles.length > 0) {
+      parts.push(`> ${e.warning} **Heads up:** the AI review failed for ${failedFiles.join(', ')} — these files were not reviewed.\n`);
+    } else if (truncated) {
       parts.push(`> ${e.warning} **Heads up:** PR diff was large and got truncated — this review may have missed parts of the change. Consider splitting large PRs.\n`);
     }
 
@@ -40795,7 +40852,9 @@ function buildReviewBody(review, prAuthor, previousCheckedScenarios = new Set(),
     parts.push(`## ${e.detective} SherlockQA's Review\n`);
     parts.push(`### ${e.summary} Summary\n${review.summary || 'No summary'}\n`);
 
-    if (truncated) {
+    if (failedFiles.length > 0) {
+      parts.push(`> ${e.warning} **Heads up:** the AI review failed for ${failedFiles.join(', ')} — these files were not reviewed.\n`);
+    } else if (truncated) {
       parts.push(`> ${e.warning} **Heads up:** PR diff was large and got truncated — this review may have missed parts of the change.\n`);
     }
 
@@ -41039,6 +41098,7 @@ module.exports = {
 
 const core = __nccwpck_require__(7484);
 const { parseReviewResponse } = __nccwpck_require__(7727);
+const { splitDiffByFile, groupFileDiffs } = __nccwpck_require__(827);
 const { callOpenAI } = __nccwpck_require__(2695);
 const { callAzureOpenAI, callAzureResponsesAPI } = __nccwpck_require__(3291);
 const { callAnthropic } = __nccwpck_require__(9524);
@@ -41060,13 +41120,56 @@ function defaultModelFor(provider) {
   }
 }
 
-async function reviewDiff({ diff, files, config }) {
-  const MAX_DIFF_CHARS = 50000;
-  const truncated = diff.length > MAX_DIFF_CHARS;
-  const diffContent = truncated ? diff.slice(0, MAX_DIFF_CHARS) + '\n\n... [diff truncated]' : diff;
+const MAX_DIFF_CHARS = 50000;
+const MAX_QA_SCENARIOS = 5;
+const VERDICT_RANK = { approved: 0, needs_changes: 1, do_not_merge: 2 };
 
-  const { review, usage, responseTruncated } = await getAIReview({ ...config, diff: diffContent, files });
-  return { review, usage, truncated, responseTruncated };
+function mergeReviews(reviews) {
+  if (reviews.length === 1) return reviews[0];
+  const worst = reviews.reduce((w, r) => ((VERDICT_RANK[r.verdict] ?? 1) > (VERDICT_RANK[w.verdict] ?? 1) ? r : w));
+  const qaScenarios = [...new Set(reviews.flatMap(r => r.qa_scenarios || []))].slice(0, MAX_QA_SCENARIOS);
+  return {
+    summary: reviews.map(r => r.summary).filter(Boolean).join(' '),
+    line_comments: reviews.flatMap(r => r.line_comments || []),
+    tests_required: reviews.some(r => r.tests_required),
+    test_suggestion: reviews.map(r => r.test_suggestion).filter(Boolean).join(' '),
+    qa_scenarios: qaScenarios,
+    code_quality: reviews.map(r => r.code_quality).find(q => q && q !== 'null') || null,
+    questions: reviews.flatMap(r => r.questions || []),
+    verdict: worst.verdict,
+    verdict_reason: worst.verdict_reason
+  };
+}
+
+async function reviewDiff({ diff, files, config }) {
+  const groups = groupFileDiffs(splitDiffByFile(diff), MAX_DIFF_CHARS);
+  if (groups.length === 0) groups.push([{ file: '', text: diff }]);
+
+  const reviews = [];
+  const failedFiles = [];
+  const usage = { input: 0, output: 0 };
+  let responseTruncated = false;
+  let lastError;
+  for (const group of groups) {
+    const groupNames = group.map(f => f.file);
+    const groupFiles = groups.length > 1 ? files.filter(f => groupNames.includes(f.filename)) : files;
+    try {
+      const result = await getAIReview({ ...config, diff: group.map(f => f.text).join(''), files: groupFiles });
+      reviews.push(result.review);
+      usage.input += result.usage?.input || 0;
+      usage.output += result.usage?.output || 0;
+      responseTruncated = responseTruncated || result.responseTruncated;
+    } catch (e) {
+      lastError = e;
+      core.warning(`Review of ${groupNames.join(', ')} failed: ${e.message}`);
+      for (const name of groupNames) {
+        if (!failedFiles.includes(name)) failedFiles.push(name);
+      }
+    }
+  }
+  if (reviews.length === 0) throw lastError;
+
+  return { review: mergeReviews(reviews), usage, truncated: false, responseTruncated, failedFiles };
 }
 
 async function getAIReview(opts) {
@@ -41375,6 +41478,7 @@ Respond with ONLY the JSON object as specified. No additional text.`;
 module.exports = {
   defaultModelFor,
   reviewDiff,
+  mergeReviews,
   getAIReview,
   PRICING,
   estimateCost,

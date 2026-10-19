@@ -85,7 +85,7 @@ async function run() {
 
     core.info(`Reviewing ${filesToReview.length} files`);
 
-    const { review, usage, truncated, responseTruncated } = await reviewDiff({
+    const { review, usage, truncated, responseTruncated, failedFiles } = await reviewDiff({
       diff: filteredDiff, files: filesToReview,
       config: {
         provider: aiProvider, model, prAuthor, persona, domainKnowledge, maxTokens,
@@ -124,7 +124,7 @@ async function run() {
     }
 
     const severityCounts = countSeverity(routed.inline);
-    const body = buildReviewBody(review, prAuthor, previousCheckedScenarios, reviewStyle, useEmoji, truncated, severityCounts, responseTruncated, routed.minorNotes);
+    const body = buildReviewBody(review, prAuthor, previousCheckedScenarios, reviewStyle, useEmoji, truncated, severityCounts, responseTruncated, routed.minorNotes, failedFiles);
 
     if (autoApprove && review.verdict === 'approved' && context.eventName !== 'pull_request') {
       core.warning('auto-approve is disabled outside same-repo pull_request events (e.g. pull_request_target): the fork diff is untrusted and could steer the verdict via prompt injection. Posting a COMMENT instead.');

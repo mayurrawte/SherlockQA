@@ -111,10 +111,65 @@ function filterDiff(diffText, ignorePatterns) {
   return kept.join('');
 }
 
+function splitDiffByFile(diffText) {
+  const fileDiffs = [];
+  for (const line of diffText.split(/(?<=\n)/)) {
+    if (line.startsWith('diff --git ')) {
+      const header = line.trimEnd().match(/^diff --git a\/.* b\/(.*)$/);
+      fileDiffs.push({ file: header ? header[1] : line.trimEnd(), text: '' });
+    }
+    if (fileDiffs.length === 0) continue;
+    fileDiffs[fileDiffs.length - 1].text += line;
+  }
+  return fileDiffs;
+}
+
+function groupFileDiffs(fileDiffs, budgetChars) {
+  const dirOf = (file) => file.slice(0, file.lastIndexOf('/') + 1);
+  const sorted = [...fileDiffs].sort((a, b) =>
+    dirOf(a.file).localeCompare(dirOf(b.file)) || b.text.length - a.text.length || a.file.localeCompare(b.file));
+
+  const groups = [];
+  let current = [];
+  let currentSize = 0;
+  for (const fileDiff of sorted) {
+    if (fileDiff.text.length > budgetChars) {
+      if (current.length > 0) groups.push(current);
+      current = [];
+      currentSize = 0;
+      // Split only at @@ hunk boundaries; a single hunk over budget stays whole.
+      const firstHunk = fileDiff.text.indexOf('\n@@') + 1;
+      const header = fileDiff.text.slice(0, firstHunk);
+      const hunks = fileDiff.text.slice(firstHunk).split(/(?=^@@ )/m);
+      let piece = header;
+      for (const hunk of hunks) {
+        if (piece !== header && piece.length + hunk.length > budgetChars) {
+          groups.push([{ file: fileDiff.file, text: piece }]);
+          piece = header;
+        }
+        piece += hunk;
+      }
+      groups.push([{ file: fileDiff.file, text: piece }]);
+      continue;
+    }
+    if (currentSize + fileDiff.text.length > budgetChars) {
+      groups.push(current);
+      current = [];
+      currentSize = 0;
+    }
+    current.push(fileDiff);
+    currentSize += fileDiff.text.length;
+  }
+  if (current.length > 0) groups.push(current);
+  return groups;
+}
+
 module.exports = {
   makeInputResolver,
   loadRepoConfig,
   matchPattern,
   globToRegex,
   filterDiff,
+  splitDiffByFile,
+  groupFileDiffs,
 };

@@ -1,5 +1,6 @@
 const core = require('@actions/core');
 const { parseReviewResponse } = require('./findings');
+const { splitDiffByFile, groupFileDiffs } = require('./collect');
 const { callOpenAI } = require('./providers/openai');
 const { callAzureOpenAI, callAzureResponsesAPI } = require('./providers/azure');
 const { callAnthropic } = require('./providers/anthropic');
@@ -21,13 +22,56 @@ function defaultModelFor(provider) {
   }
 }
 
-async function reviewDiff({ diff, files, config }) {
-  const MAX_DIFF_CHARS = 50000;
-  const truncated = diff.length > MAX_DIFF_CHARS;
-  const diffContent = truncated ? diff.slice(0, MAX_DIFF_CHARS) + '\n\n... [diff truncated]' : diff;
+const MAX_DIFF_CHARS = 50000;
+const MAX_QA_SCENARIOS = 5;
+const VERDICT_RANK = { approved: 0, needs_changes: 1, do_not_merge: 2 };
 
-  const { review, usage, responseTruncated } = await getAIReview({ ...config, diff: diffContent, files });
-  return { review, usage, truncated, responseTruncated };
+function mergeReviews(reviews) {
+  if (reviews.length === 1) return reviews[0];
+  const worst = reviews.reduce((w, r) => ((VERDICT_RANK[r.verdict] ?? 1) > (VERDICT_RANK[w.verdict] ?? 1) ? r : w));
+  const qaScenarios = [...new Set(reviews.flatMap(r => r.qa_scenarios || []))].slice(0, MAX_QA_SCENARIOS);
+  return {
+    summary: reviews.map(r => r.summary).filter(Boolean).join(' '),
+    line_comments: reviews.flatMap(r => r.line_comments || []),
+    tests_required: reviews.some(r => r.tests_required),
+    test_suggestion: reviews.map(r => r.test_suggestion).filter(Boolean).join(' '),
+    qa_scenarios: qaScenarios,
+    code_quality: reviews.map(r => r.code_quality).find(q => q && q !== 'null') || null,
+    questions: reviews.flatMap(r => r.questions || []),
+    verdict: worst.verdict,
+    verdict_reason: worst.verdict_reason
+  };
+}
+
+async function reviewDiff({ diff, files, config }) {
+  const groups = groupFileDiffs(splitDiffByFile(diff), MAX_DIFF_CHARS);
+  if (groups.length === 0) groups.push([{ file: '', text: diff }]);
+
+  const reviews = [];
+  const failedFiles = [];
+  const usage = { input: 0, output: 0 };
+  let responseTruncated = false;
+  let lastError;
+  for (const group of groups) {
+    const groupNames = group.map(f => f.file);
+    const groupFiles = groups.length > 1 ? files.filter(f => groupNames.includes(f.filename)) : files;
+    try {
+      const result = await getAIReview({ ...config, diff: group.map(f => f.text).join(''), files: groupFiles });
+      reviews.push(result.review);
+      usage.input += result.usage?.input || 0;
+      usage.output += result.usage?.output || 0;
+      responseTruncated = responseTruncated || result.responseTruncated;
+    } catch (e) {
+      lastError = e;
+      core.warning(`Review of ${groupNames.join(', ')} failed: ${e.message}`);
+      for (const name of groupNames) {
+        if (!failedFiles.includes(name)) failedFiles.push(name);
+      }
+    }
+  }
+  if (reviews.length === 0) throw lastError;
+
+  return { review: mergeReviews(reviews), usage, truncated: false, responseTruncated, failedFiles };
 }
 
 async function getAIReview(opts) {
@@ -336,6 +380,7 @@ Respond with ONLY the JSON object as specified. No additional text.`;
 module.exports = {
   defaultModelFor,
   reviewDiff,
+  mergeReviews,
   getAIReview,
   PRICING,
   estimateCost,

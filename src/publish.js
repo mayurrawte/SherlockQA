@@ -131,7 +131,7 @@ function formatMinorNotesBlock(minorNotes, e) {
   return lines;
 }
 
-function buildReviewBody(review, prAuthor, previousCheckedScenarios = new Set(), reviewStyle = 'compact', useEmoji = true, truncated = false, severityCounts = null, responseTruncated = false, minorNotes = []) {
+function buildReviewBody(review, prAuthor, previousCheckedScenarios = new Set(), reviewStyle = 'compact', useEmoji = true, truncated = false, severityCounts = null, responseTruncated = false, minorNotes = [], failedFiles = []) {
   const e = useEmoji ? {
     detective: '🔍', summary: '📝', tests: '🧪', qa: '🎯', questions: '❓',
     quality: '🧹', verdict: '🏁', approved: '✅', needs_changes: '⚠️',
@@ -165,7 +165,9 @@ function buildReviewBody(review, prAuthor, previousCheckedScenarios = new Set(),
     parts.push(`**Verdict:** ${verdictEmoji[review.verdict] || e.needs_changes} ${verdictText[review.verdict] || review.verdict} | ${issueCount} issues${severityStr}${minorNotesStr}${qaStr}${questionCount > 0 ? ` · ${questionCount} questions` : ''}\n`);
     if (review.verdict_reason) parts.push(`> ${review.verdict_reason}\n`);
 
-    if (truncated) {
+    if (failedFiles.length > 0) {
+      parts.push(`> ${e.warning} **Heads up:** the AI review failed for ${failedFiles.join(', ')} — these files were not reviewed.\n`);
+    } else if (truncated) {
       parts.push(`> ${e.warning} **Heads up:** PR diff was large and got truncated — this review may have missed parts of the change. Consider splitting large PRs.\n`);
     }
 
@@ -215,7 +217,9 @@ function buildReviewBody(review, prAuthor, previousCheckedScenarios = new Set(),
     parts.push(`## ${e.detective} SherlockQA's Review\n`);
     parts.push(`### ${e.summary} Summary\n${review.summary || 'No summary'}\n`);
 
-    if (truncated) {
+    if (failedFiles.length > 0) {
+      parts.push(`> ${e.warning} **Heads up:** the AI review failed for ${failedFiles.join(', ')} — these files were not reviewed.\n`);
+    } else if (truncated) {
       parts.push(`> ${e.warning} **Heads up:** PR diff was large and got truncated — this review may have missed parts of the change.\n`);
     }
 
