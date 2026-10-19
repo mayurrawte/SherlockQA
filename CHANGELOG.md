@@ -7,6 +7,17 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) an
 
 ## [Unreleased]
 
+### Added
+- **Repository rule files** — SherlockQA reads `CLAUDE.md`, `AGENTS.md`, `PATTERNS.md`, `.cursorrules`, `.github/copilot-instructions.md` and `.sherlockqa/rules/*.md` from the PR's base branch and adds them to the review prompt (up to 20,000 characters); `actions/checkout` must run before SherlockQA.
+- **Local replay benchmark** — `bench/` replays saved cases through a SherlockQA version so review quality can be compared between versions (see [bench/README.md](bench/README.md)).
+
+### Changed
+- **Large PRs are reviewed in full** — the diff is split into groups of related files, each reviewed in its own model call, and the findings are merged instead of being cut off at 50,000 characters. If a group's review fails, the summary names the unreviewed files and the verdict is never `approved`.
+- **Internal module split** — `src/index.js` is split into pipeline modules (`collect`, `context`, `review`, `providers/`, `findings`, `publish`) with no behaviour change.
+
+### Fixed
+- **Ignored files no longer use up the review budget** — files matching `ignore-patterns` are removed from the diff sent to the model, not only from the file list.
+
 ### Planned
 - `@sherlock` mention-to-respond on review threads
 - `/sherlock` slash commands (`review-again`, `explain`, `ignore`, `approve`)

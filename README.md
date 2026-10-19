@@ -55,6 +55,7 @@ jobs:
   review:
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
       - uses: mayurrawte/SherlockQA@v1
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
@@ -245,6 +246,10 @@ domain-knowledge: |
   Multi-tenant SaaS. Treat any cross-tenant data access as a critical security issue.
   All money is stored as integer cents — flag any floating-point arithmetic on amounts.
 ```
+
+## Repository rules
+
+SherlockQA reads the repository's own review rules and adds them to the review prompt: `CLAUDE.md`, `AGENTS.md`, `PATTERNS.md`, `.cursorrules`, `.github/copilot-instructions.md`, and `.sherlockqa/rules/*.md`. Up to 20,000 characters are used. Rules are read from the PR's base branch, never the PR branch, so a PR cannot change its own review rules. Run `actions/checkout` before SherlockQA; without it, the review runs without rules and logs a warning.
 
 ## Personalities
 

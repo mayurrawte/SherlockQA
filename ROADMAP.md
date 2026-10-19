@@ -110,11 +110,11 @@ Three pillars:
 
 > Close the catch-rate gap with paid competitors using lightweight context.
 
-- [ ] **Map-reduce chunked review** — kill the 50K-char truncation cliff
+- [~] **Map-reduce chunked review** — kill the 50K-char truncation cliff
 - [ ] **Light repo context** — pull file signatures of imports/symbols referenced in the diff
 - [ ] **Propose-a-fix `suggestion` blocks** — one-click commit for trivial fixes
 - [ ] **Learn-from-dismissals** — persist `.sherlock/dismissed.json`, skip matched findings
-- [ ] **Custom rules directory** — `.sherlockqa/rules/*.md` loaded into prompt
+- [~] **Custom rules directory** — `.sherlockqa/rules/*.md` loaded into prompt
 - [ ] **PR title / conventional-commits check** — optional `check-title: true`
 
 **Success criteria:** large PRs (>1000 lines) produce reviews without the truncation banner; dismissed findings stop reappearing.
