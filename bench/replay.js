@@ -2,6 +2,8 @@ const fs = require('fs');
 const path = require('path');
 const { execFileSync } = require('child_process');
 const { reviewDiff, estimateCost, defaultModelFor, filterAndRouteComments, matchPattern } = require('../src/index');
+const { filterDiff } = require('../src/collect');
+const { loadRuleFiles, formatRules } = require('../src/context');
 
 const IGNORE_PATTERNS = ['*.md', '*.txt', 'package-lock.json', 'yarn.lock'];
 
@@ -88,7 +90,12 @@ async function main() {
     for (const benchCase of cases) {
       try {
         const range = `${benchCase.base}...${benchCase.head}`;
-        const diff = git('diff', '--src-prefix=a/', '--dst-prefix=b/', range);
+        const diff = filterDiff(git('diff', '--src-prefix=a/', '--dst-prefix=b/', range), IGNORE_PATTERNS);
+        if (!diff) {
+          throw new Error('no files left to review after ignore patterns');
+        }
+        const { rules, warning } = loadRuleFiles({ repoPath: args.repo, baseSha: benchCase.base });
+        if (warning) console.warn(`${benchCase.id}: ${warning}`);
         const files = git('diff', '--name-only', range)
           .split('\n')
           .filter(name => name && !IGNORE_PATTERNS.some(pattern => matchPattern(name, pattern)))
@@ -103,7 +110,7 @@ async function main() {
         }
 
         const started = Date.now();
-        const { review, usage, truncated, responseTruncated } = await reviewDiff({ diff, files, config });
+        const { review, usage, truncated, responseTruncated } = await reviewDiff({ diff, files, config: { ...config, repoRules: formatRules(rules) } });
         const wallMs = Date.now() - started;
 
         const findings = filterAndRouteComments(review.line_comments || [], filter).inline;
