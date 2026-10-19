@@ -3,6 +3,7 @@ const github = require('@actions/github');
 const { SEVERITY_EMOJI, normalizeSeverity, normalizeConfidence, filterAndRouteComments, parseReviewResponse, countSeverity } = require('./findings');
 const { makeInputResolver, loadRepoConfig, matchPattern, globToRegex, filterDiff } = require('./collect');
 const { defaultModelFor, reviewDiff, estimateCost, buildSystemPrompt, buildUserPrompt } = require('./review');
+const { loadRuleFiles } = require('./context');
 const { REVIEW_MARKER, isSherlockReview, findPreviousState, syncInlineComments, buildReviewBody, parseDiffForLinePositions, upsertStickyComment, createCheckRunSafely, isScenarioPreviouslyChecked } = require('./publish');
 const { callAnthropic } = require('./providers/anthropic');
 const { callBedrock } = require('./providers/bedrock');
@@ -85,11 +86,18 @@ async function run() {
 
     core.info(`Reviewing ${filesToReview.length} files`);
 
+    const { rules, warning: rulesWarning } = loadRuleFiles({
+      repoPath: process.env.GITHUB_WORKSPACE || process.cwd(),
+      baseSha: context.payload.pull_request.base.sha
+    });
+    if (rulesWarning) core.warning(rulesWarning);
+    const repoRules = rules.map(r => `### ${r.path}\n${r.text}`).join('\n\n');
+
     const { review, usage, truncated, responseTruncated, failedFiles } = await reviewDiff({
       diff: filteredDiff, files: filesToReview,
       config: {
         provider: aiProvider, model, prAuthor, persona, domainKnowledge, maxTokens,
-        codeQuality, personality, strictness: reviewStrictness, mode, maxComments
+        codeQuality, personality, strictness: reviewStrictness, mode, maxComments, repoRules
       }
     });
 

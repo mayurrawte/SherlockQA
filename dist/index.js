@@ -39934,6 +39934,70 @@ module.exports = {
 
 /***/ }),
 
+/***/ 4270:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+const { execFileSync } = __nccwpck_require__(5317);
+
+const RULE_PATHS = ['CLAUDE.md', 'AGENTS.md', 'PATTERNS.md', '.cursorrules', '.github/copilot-instructions.md'];
+const RULES_DIR = '.sherlockqa/rules/';
+
+function git(repoPath, args) {
+  return execFileSync('git', ['-C', repoPath, ...args], { encoding: 'utf8', stdio: 'pipe', maxBuffer: 10 * 1024 * 1024 });
+}
+
+// Reads from the base commit only, so a PR cannot rewrite the rules it is reviewed against.
+function loadRuleFiles({ repoPath, baseSha, budgetChars = 20000 }) {
+  const unavailable = { rules: [], warning: 'Repository rules skipped: the base commit is unavailable.' };
+
+  try {
+    git(repoPath, ['cat-file', '-e', `${baseSha}^{commit}`]);
+  } catch {
+    try {
+      git(repoPath, ['fetch', '--depth=1', 'origin', baseSha]);
+      git(repoPath, ['cat-file', '-e', `${baseSha}^{commit}`]);
+    } catch {
+      return unavailable;
+    }
+  }
+
+  let ruleDirFiles = [];
+  try {
+    ruleDirFiles = git(repoPath, ['ls-tree', '--name-only', baseSha, RULES_DIR])
+      .split('\n').filter(p => p.endsWith('.md')).sort();
+  } catch {
+    ruleDirFiles = [];
+  }
+
+  const rules = [];
+  const skipped = [];
+  let total = 0;
+  for (const filePath of [...RULE_PATHS, ...ruleDirFiles]) {
+    let text;
+    try {
+      text = git(repoPath, ['show', `${baseSha}:${filePath}`]);
+    } catch {
+      continue;
+    }
+    if (total + text.length > budgetChars) {
+      skipped.push(filePath);
+      continue;
+    }
+    total += text.length;
+    rules.push({ path: filePath, text });
+  }
+
+  const warning = skipped.length > 0
+    ? `Repository rules skipped because they exceed the ${budgetChars} character budget: ${skipped.join(', ')}`
+    : null;
+  return { rules, warning };
+}
+
+module.exports = { loadRuleFiles };
+
+
+/***/ }),
+
 /***/ 7727:
 /***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
 
@@ -40048,6 +40112,7 @@ const github = __nccwpck_require__(3228);
 const { SEVERITY_EMOJI, normalizeSeverity, normalizeConfidence, filterAndRouteComments, parseReviewResponse, countSeverity } = __nccwpck_require__(7727);
 const { makeInputResolver, loadRepoConfig, matchPattern, globToRegex, filterDiff } = __nccwpck_require__(827);
 const { defaultModelFor, reviewDiff, estimateCost, buildSystemPrompt, buildUserPrompt } = __nccwpck_require__(1565);
+const { loadRuleFiles } = __nccwpck_require__(4270);
 const { REVIEW_MARKER, isSherlockReview, findPreviousState, syncInlineComments, buildReviewBody, parseDiffForLinePositions, upsertStickyComment, createCheckRunSafely, isScenarioPreviouslyChecked } = __nccwpck_require__(2090);
 const { callAnthropic } = __nccwpck_require__(9524);
 const { callBedrock } = __nccwpck_require__(7594);
@@ -40130,11 +40195,18 @@ async function run() {
 
     core.info(`Reviewing ${filesToReview.length} files`);
 
+    const { rules, warning: rulesWarning } = loadRuleFiles({
+      repoPath: process.env.GITHUB_WORKSPACE || process.cwd(),
+      baseSha: context.payload.pull_request.base.sha
+    });
+    if (rulesWarning) core.warning(rulesWarning);
+    const repoRules = rules.map(r => `### ${r.path}\n${r.text}`).join('\n\n');
+
     const { review, usage, truncated, responseTruncated, failedFiles } = await reviewDiff({
       diff: filteredDiff, files: filesToReview,
       config: {
         provider: aiProvider, model, prAuthor, persona, domainKnowledge, maxTokens,
-        codeQuality, personality, strictness: reviewStrictness, mode, maxComments
+        codeQuality, personality, strictness: reviewStrictness, mode, maxComments, repoRules
       }
     });
 
@@ -41177,10 +41249,10 @@ async function reviewDiff({ diff, files, config }) {
 
 async function getAIReview(opts) {
   const { provider, model, diff, files, prAuthor, persona, domainKnowledge,
-    maxTokens, codeQuality, personality, strictness, mode, maxComments } = opts;
+    maxTokens, codeQuality, personality, strictness, mode, maxComments, repoRules } = opts;
 
   const changedFiles = files.map(f => f.filename).join('\n');
-  const systemPrompt = buildSystemPrompt(persona, domainKnowledge, codeQuality, personality, strictness, mode, maxComments);
+  const systemPrompt = buildSystemPrompt(persona, domainKnowledge, codeQuality, personality, strictness, mode, maxComments, repoRules);
   const userPrompt = buildUserPrompt(changedFiles, diff, prAuthor);
 
   const callers = {
@@ -41275,7 +41347,7 @@ async function withRetry(fn, label, attempts = 3) {
   throw lastErr;
 }
 
-function buildSystemPrompt(persona, domainKnowledge, codeQuality, personality = 'detective', strictness = 'balanced', mode = 'general', maxComments = 5) {
+function buildSystemPrompt(persona, domainKnowledge, codeQuality, personality = 'detective', strictness = 'balanced', mode = 'general', maxComments = 5, repoRules = '') {
   let prompt = '';
   if (persona) prompt += `${persona}\n\n`;
 
@@ -41357,6 +41429,10 @@ function buildSystemPrompt(persona, domainKnowledge, codeQuality, personality = 
 
   if (domainKnowledge) {
     prompt += `\n\n## Domain Context:\n${domainKnowledge}`;
+  }
+
+  if (repoRules) {
+    prompt += `\n\n## Repository rules (from the base branch)\n${repoRules}`;
   }
 
   const strictnessGuidelines = {

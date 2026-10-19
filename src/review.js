@@ -79,10 +79,10 @@ async function reviewDiff({ diff, files, config }) {
 
 async function getAIReview(opts) {
   const { provider, model, diff, files, prAuthor, persona, domainKnowledge,
-    maxTokens, codeQuality, personality, strictness, mode, maxComments } = opts;
+    maxTokens, codeQuality, personality, strictness, mode, maxComments, repoRules } = opts;
 
   const changedFiles = files.map(f => f.filename).join('\n');
-  const systemPrompt = buildSystemPrompt(persona, domainKnowledge, codeQuality, personality, strictness, mode, maxComments);
+  const systemPrompt = buildSystemPrompt(persona, domainKnowledge, codeQuality, personality, strictness, mode, maxComments, repoRules);
   const userPrompt = buildUserPrompt(changedFiles, diff, prAuthor);
 
   const callers = {
@@ -177,7 +177,7 @@ async function withRetry(fn, label, attempts = 3) {
   throw lastErr;
 }
 
-function buildSystemPrompt(persona, domainKnowledge, codeQuality, personality = 'detective', strictness = 'balanced', mode = 'general', maxComments = 5) {
+function buildSystemPrompt(persona, domainKnowledge, codeQuality, personality = 'detective', strictness = 'balanced', mode = 'general', maxComments = 5, repoRules = '') {
   let prompt = '';
   if (persona) prompt += `${persona}\n\n`;
 
@@ -259,6 +259,10 @@ function buildSystemPrompt(persona, domainKnowledge, codeQuality, personality = 
 
   if (domainKnowledge) {
     prompt += `\n\n## Domain Context:\n${domainKnowledge}`;
+  }
+
+  if (repoRules) {
+    prompt += `\n\n## Repository rules (from the base branch)\n${repoRules}`;
   }
 
   const strictnessGuidelines = {
