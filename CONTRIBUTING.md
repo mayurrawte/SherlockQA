@@ -7,7 +7,7 @@ Thanks for thinking about contributing! SherlockQA is a small, focused GitHub Ac
 ```bash
 git clone https://github.com/mayurrawte/SherlockQA.git
 cd SherlockQA
-npm install
+pnpm install
 ```
 
 ## Project layout
@@ -26,7 +26,7 @@ CHANGELOG.md              # Release notes
 The action runs from `dist/index.js`, which is a single bundled file produced by [`@vercel/ncc`](https://github.com/vercel/ncc). **You must rebuild before committing** if you change anything in `src/`.
 
 ```bash
-npm run build
+pnpm run build
 ```
 
 This regenerates `dist/index.js`. Commit both `src/` and `dist/` together.
@@ -82,7 +82,7 @@ Check [ROADMAP.md](ROADMAP.md) first. If it's already planned, +1 the relevant i
 
 - Keep them small and focused. One concern per PR.
 - Update `CHANGELOG.md` under `[Unreleased]`.
-- Run `npm run build` and commit the updated `dist/`.
+- Run `pnpm run build` and commit the updated `dist/`.
 - Reference any relevant ROADMAP line.
 - Be patient — this is a side project, not a job.
 
